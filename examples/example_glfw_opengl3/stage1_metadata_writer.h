@@ -135,7 +135,9 @@ public:
     static std::string MakeDeterministicUuid(const std::string& seed);
 
     void RecordDatasetExport(const DatasetRecord& record, PersistMode mode = PersistMode::DatabaseAndFile);
-    void RecordWalkforwardRun(const WalkforwardRecord& record, PersistMode mode = PersistMode::DatabaseAndFile);
+    bool RecordWalkforwardRun(const WalkforwardRecord& record,
+                              std::string* error = nullptr,
+                              PersistMode mode = PersistMode::DatabaseAndFile);
     void RecordSimulationRun(
         const SimulationRecord& record,
         const std::vector<ExecutedTrade>& trades,

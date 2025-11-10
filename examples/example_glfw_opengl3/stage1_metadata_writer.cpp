@@ -65,6 +65,10 @@ void WriteJsonObjectOrEmpty(rapidjson::Writer<rapidjson::StringBuffer>& writer,
 std::string BuildDatasetJson(const Stage1MetadataWriter::DatasetRecord& record) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    const std::string indicatorMeasurement = record.indicator_measurement.empty()
+        ? record.dataset_slug
+        : record.indicator_measurement;
+
     writer.StartObject();
     writer.Key("dataset_id");
     writer.String(record.dataset_id.c_str());
@@ -76,42 +80,22 @@ std::string BuildDatasetJson(const Stage1MetadataWriter::DatasetRecord& record) 
     writer.String(record.granularity.c_str());
     writer.Key("source");
     writer.String(record.source.c_str());
-    writer.Key("ohlcv_measurement");
-    writer.String(record.ohlcv_measurement.c_str());
     writer.Key("indicator_measurement");
-    writer.String(record.indicator_measurement.c_str());
-    writer.Key("ohlcv_row_count");
-    writer.Int64(record.ohlcv_row_count);
-    writer.Key("indicator_row_count");
-    writer.Int64(record.indicator_row_count);
-    writer.Key("ohlcv_first_ts");
-    if (record.ohlcv_first_timestamp_unix) {
-        writer.Int64(*record.ohlcv_first_timestamp_unix);
-    } else {
-        writer.Null();
+    writer.String(indicatorMeasurement.c_str());
+    if (!record.ohlcv_measurement.empty()) {
+        writer.Key("ohlcv_measurement");
+        writer.String(record.ohlcv_measurement.c_str());
     }
-    writer.Key("ohlcv_last_ts");
-    if (record.ohlcv_last_timestamp_unix) {
-        writer.Int64(*record.ohlcv_last_timestamp_unix);
-    } else {
-        writer.Null();
+    if (record.ohlcv_row_count > 0) {
+        writer.Key("ohlcv_row_count");
+        writer.Int64(record.ohlcv_row_count);
     }
-    writer.Key("indicator_first_ts");
-    if (record.indicator_first_timestamp_unix) {
-        writer.Int64(*record.indicator_first_timestamp_unix);
-    } else {
-        writer.Null();
-    }
-    writer.Key("indicator_last_ts");
-    if (record.indicator_last_timestamp_unix) {
-        writer.Int64(*record.indicator_last_timestamp_unix);
-    } else {
-        writer.Null();
+    if (record.indicator_row_count > 0) {
+        writer.Key("indicator_row_count");
+        writer.Int64(record.indicator_row_count);
     }
     writer.Key("metadata");
     WriteJsonObjectOrEmpty(writer, record.metadata_json);
-    writer.Key("created_at");
-    writer.String(ToIso8601(record.created_at).c_str());
     writer.EndObject();
     return std::string(buffer.GetString(), buffer.GetSize());
 }
@@ -361,7 +345,10 @@ std::string BuildSimulationJson(const Stage1MetadataWriter::SimulationRecord& re
     return std::string(buffer.GetString(), buffer.GetSize());
 }
 
-bool PostStage1Json(const char* label, const std::string& path, const std::string& payload) {
+bool PostStage1Json(const char* label,
+                    const std::string& path,
+                    const std::string& payload,
+                    std::string* errorOut = nullptr) {
     stage1::RestClient& api = stage1::RestClient::Instance();
     long status = 0;
     std::string response;
@@ -369,6 +356,9 @@ bool PostStage1Json(const char* label, const std::string& path, const std::strin
     if (!api.PostJson(path, payload, &status, &response, &error)) {
         std::cerr << "[Stage1MetadataWriter] Failed to POST " << label
                   << " to Stage1 API: " << (error.empty() ? "unknown error" : error) << std::endl;
+        if (errorOut) {
+            *errorOut = error.empty() ? "Stage1 API request failed" : error;
+        }
         return false;
     }
     if (status < 200 || status >= 300) {
@@ -378,6 +368,11 @@ bool PostStage1Json(const char* label, const std::string& path, const std::strin
             std::cerr << " (" << response << ")";
         }
         std::cerr << std::endl;
+        if (errorOut) {
+            *errorOut = response.empty()
+                ? "Stage1 API returned HTTP " + std::to_string(status)
+                : response;
+        }
         return false;
     }
     return true;
@@ -513,7 +508,9 @@ void Stage1MetadataWriter::RecordDatasetExport(const DatasetRecord& record, Pers
     AppendSql(sql.str(), mode);
 }
 
-void Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record, PersistMode mode) {
+bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
+                                                std::string* error,
+                                                PersistMode mode) {
     std::string requester = record.requested_by.empty() ? CurrentUsername() : record.requested_by;
     const std::string runJson = BuildRunJson(record, requester);
 
@@ -548,7 +545,8 @@ void Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
         << "  duration_ms = EXCLUDED.duration_ms,\n"
         << "  summary_metrics = EXCLUDED.summary_metrics;\n\n";
 
-    PostStage1Json("walkforward run", "/api/runs", runJson);
+    std::string stage1Error;
+    bool apiSuccess = PostStage1Json("walkforward run", "/api/runs", runJson, &stage1Error);
     AppendSql(sql.str(), mode);
 
     for (const auto& fold : record.folds) {
@@ -625,6 +623,14 @@ void Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
                 << "  metrics = EXCLUDED.metrics;\n\n";
         AppendSql(foldSql.str(), mode);
     }
+
+    if (!apiSuccess) {
+        if (error) {
+            *error = stage1Error;
+        }
+        return false;
+    }
+    return true;
 }
 
 void Stage1MetadataWriter::RecordSimulationRun(

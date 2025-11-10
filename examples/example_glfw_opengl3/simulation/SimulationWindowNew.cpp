@@ -970,7 +970,14 @@ void SimulationWindow::Impl::PersistRun(const SimulationRun& run) {
         return;
     }
 
-    Stage1MetadataWriter::Instance().RecordWalkforwardRun(record);
+    std::string stage1Error;
+    if (!Stage1MetadataWriter::Instance().RecordWalkforwardRun(record, &stage1Error)) {
+        const std::string message = stage1Error.empty()
+            ? "Stage1 export failed for '" + measurement + "'."
+            : "Stage1 export failed: " + stage1Error;
+        QueueSaveStatus(message, false);
+        return;
+    }
     m_savedRunIds.insert(record.run_id);
     QueueSaveStatus("Run exported to Stage1 (measurement '" + measurement + "').", true);
 }
