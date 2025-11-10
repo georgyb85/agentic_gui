@@ -1,0 +1,7 @@
+in folder "for review" there's test project that uses the same chronosflow to read a file from disk and run bivariate analysis. don't use these files, if you need any of them for this task, just copy and edit copied files.
+
+in our project we have timeserieswidnow, where user can load file. if file is loaded we need to be able to do simialr bivariate anaylysis
+
+for that i want you to develop a separate widget that lists all columns from the file and lets user select multiple columns to run bivariate analysis, also there should be gui element to select target and other bivariate parameters- number of bins, mcpt test etc
+
+when user runs test, test must be run in the background so gui is responsive and results of the test shall be displayed in a dear imgui table (same as the example code prints them  to console)

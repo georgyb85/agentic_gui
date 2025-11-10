@@ -1,0 +1,5 @@
+when user selects different columns in timeseries window, each time new histogram window is rendered with its own size and coordinates and settings, so as user selects different columns, the histogram window may jump over the screen which is very distracting. the histogram window shall keep its dimensions and position when user switches indicator(column) it's plotting.
+
+in histogram window, when auto range is unchecked, user can edit range from and to, these values must be constrained by this timeseries' min and max value, so when user typs something outside of this range(and stops editing), value should be adjusted accordingly. add 2 other fields - ranges in % that can be draggable and their values should be linked to numeric values we have already. so if use drags min value to 10% and max value to 90%, numeric values in range fields (that we have already) should be adjusted accordingly, and vice versa. 
+
+there should be checkbox "show tails" that when checked, aggregates all values outside ranges into single bars (all values > max range and all values < min range are aggregated into 2 separate bars)

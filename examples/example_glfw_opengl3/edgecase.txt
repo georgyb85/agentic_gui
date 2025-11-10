@@ -1,0 +1,94 @@
+Correctness and Edge Case: State Across Read Calls
+The in_whitespace_ flag tracks whether the previous character processed was a whitespace. This state is crucial and must be maintained across separate calls to Read.
+The Problem: Your current implementation correctly maintains this state within a single Read call. However, consider this scenario:
+The CSV reader calls Read(100, ...)
+Your Read method processes data and the very last character it processes from the file is a space. It sets in_whitespace_ = true.
+The call finishes.
+The CSV reader later calls Read(100, ...) again.
+Your Read method starts, and in_whitespace_ is still true. If the first character of the new chunk is also a space, your code will correctly skip it.
+So far, so good. But what if the last character of a file is a space, but not followed by a newline?
+Example file content: 1 2 3 (with a trailing space)
+Your stream will correctly output 1\t2\t3\t.
+The CSV parser will see this as a row with 3 valid values and a final empty string value, which is probably not what's intended.
+A more robust normalizer should only consider a sequence of whitespace a "delimiter" if it is followed by a non-whitespace character. The state in_whitespace_ is a good way to handle this, but we need to ensure we don't emit a trailing delimiter if the file ends with spaces.
+The current implementation is actually quite robust against this already because the state is preserved. However, there is a logic bug that can occur if a line break \n is considered whitespace.
+The Refinement: The logic should treat \n and \r as special characters that reset the whitespace state but are passed through directly. This ensures that a space at the end of a line doesn't merge with spaces at the beginning of the next line.
+Refined Read Implementation
+Here is the slightly modified Read method that handles newlines correctly. This makes it more robust for standard text-based CSV files.
+File: dataframe_io.cpp
+code
+C++
+// In WhitespaceNormalizingInputStream::Read
+arrow::Result<int64_t> WhitespaceNormalizingInputStream::Read(int64_t nbytes, void* out) {
+    auto write_ptr = static_cast<char*>(out);
+    auto write_end = write_ptr + nbytes;
+    int64_t total_written = 0;
+
+    while (write_ptr < write_end) {
+        if (read_ptr_ == read_end_) {
+            ARROW_ASSIGN_OR_RAISE(read_buffer_, underlying_->Read(32768));
+            if (read_buffer_->size() == 0) {
+                break;
+            }
+            read_ptr_ = reinterpret_cast<const char*>(read_buffer_->data());
+            read_end_ = read_ptr_ + read_buffer_->size();
+        }
+
+        while (read_ptr_ < read_end_ && write_ptr < write_end) {
+            char c = *read_ptr_++;
+
+            // Pass through newlines and carriage returns directly, and reset state
+            if (c == '\n' || c == '\r') {
+                *write_ptr++ = c;
+                in_whitespace_ = false; 
+            } else if (c == ' ' || c == '\t') {
+                if (!in_whitespace_) {
+                    *write_ptr++ = normalized_delimiter_;
+                    in_whitespace_ = true;
+                }
+            } else {
+                *write_ptr++ = c;
+                in_whitespace_ = false;
+            }
+        }
+    }
+
+    total_written = write_ptr - static_cast<char*>(out);
+    pos_ += total_written;
+    return total_written;
+}
+This change is subtle but important for correctness. It prevents the state from "leaking" across line breaks, ensuring that 1 2 \n 3 4 is parsed as two separate rows, not as 1\t2\t3\t4.
+Optimization: detect_delimiter
+Your current detect_delimiter function is quite good, but the logic for counting space-separated fields can be simplified and made slightly more efficient.
+code
+C++
+// In dataframe_io.cpp
+char DataFrameIO::detect_delimiter(const std::string& sample_line) {
+    // This part is fine
+    std::vector<char> delimiters = {'\t', ',', ';', '|', ' '};
+    std::vector<int> counts(delimiters.size(), 0);
+    
+    for (size_t i = 0; i < delimiters.size() - 1; ++i) {
+        counts[i] = std::count(sample_line.begin(), sample_line.end(), delimiters[i]);
+    }
+
+    // A simpler way to count space delimiters: count transitions from non-space to space
+    int space_delimiters = 0;
+    if (!sample_line.empty()) {
+        for (size_t i = 1; i < sample_line.length(); ++i) {
+            if ((sample_line[i] == ' ' || sample_line[i] == '\t') && 
+                (sample_line[i-1] != ' ' && sample_line[i-1] != '\t')) {
+                space_delimiters++;
+            }
+        }
+    }
+    counts[4] = space_delimiters;
+    
+    auto max_it = std::max_element(counts.begin(), counts.end());
+    if (max_it == counts.end() || *max_it == 0) {
+        return '\t'; // Default
+    }
+    
+    return delimiters[std::distance(counts.begin(), max_it)];
+}
+This simplified logic is less about counting "fields" and more directly about counting the occurrences of delimiter sequences, which is more robust.

@@ -1,0 +1,1255 @@
+Variables
+The Variable List File contains a list of all variables that may be used. It is an ASCII text file
+containing one variable definition per line. The syntax is as follows:
+UserName : Definition [Parameters] [ : Normalization ] [ ! MinFraction ]
+The first item on the line is a name chosen by the user. This is the name that will appear in all
+studies. It should be reasonably short, yet descriptive to the user. It may contain only letters,
+numbers, and the underscore character (_).
+The user name is followed by a colon (with or without a space between) and then the definition
+of the family. Legal families will be discussed soon. Most but not all families require one or
+more parameters to immediately follow.
+Blank lines, which can help separate groups of variables, are legal. Any text after a semicolon
+(;) is ignored and can be used for comments.
+References to an Index Market
+Some variables reference a ‘market’ that is actually an index, such as the S&P 500. When this
+is done, the user must specify the index market using the INDEX IS script file entry described
+on Page 6. Most variables can be modified by placing the keyword IS INDEX or MINUS
+INDEX after the definition. The former causes the value of the variable to be computed using
+the index market rather than the current market. The latter causes the variable to be computed
+for both the current market and the index market. The final result is the value for the current
+market minus that for the index market. Thus, the MINUS INDEX variation describes the
+behavior of the current market relative to a broad market index.
+For example, the PRICE MOMENTUM variable described on Page 38 measures how rapidly
+the market price is changing. When this variable is specified, its value will be computed for each
+market on each trading day. If the variable is specified as PRICE MOMENTUM IS INDEX,
+then for each day, the value computed for every market will be that for the index market rather
+than that for the market itself. If the variable is PRICE MOMENTUM MINUS INDEX, each
+day’s value for each market will be that market’s price momentum minus the index market’s
+price momentum. Thus, on a day when a given market’s momentum is flat but the index market
+has strong downward momentum, the value of this variable will be strongly positive.
+-26-
+If the user employs more than one index, the specific index can be specified by appending the
+corresponding integer to the INDEX keyword. No space should separate them. For example,
+INDEX5 stands for index number 5.
+Historical Normalization
+The only required fields are the two just described. However, one or both of two optional fields
+may appear as well. The family and any parameters may be followed by another colon, one of
+the words, CENTER, SCALE, or NORMALIZE, and an integer greater than one. In this case,
+as each value of the variable is computed, the program will look back at the history of this
+variable for the specified number of cases. The CENTER option causes the historical median
+to be subtracted from the computed value. The SCALE option causes the computed value to
+be divided by the historical interquartile range. The NORMALIZE option causes both
+operations to be performed (CENTER first, and then SCALE). One more stage of
+transformation, described at the end of this section, is also performed for SCALE and
+NORMALIZE. These options are an excellent way of forcing a great degree of stationarity on
+the data. As long as the historical lookback period is made long relative to the trading rate,
+important information is almost never lost, and the improvement in stationarity can be
+enormous.
+Centering can be useful for stabilizing slow-moving indicators across long periods of time. For
+example, suppose we have a large-scale trend indicator, and we devise a trading rule that opens
+long positions when this indicator is unusually positive. Also suppose we hope for trades that
+have a duration of a few days to perhaps a few weeks, and we would like to obtain such trades
+regularly. If a market spends long periods of time in an upward trend, and other long periods
+in a downward trend, this indicator will flag an enormous number of trades in the up periods,
+and then shut off in the down periods. By subtracting a historical median, these long periods
+of alternating performance will be reduced. In a long period of upward trend, the indicator will
+no longer describe the trend. Rather, it will tell us whether the current trend is up versus down
+relative to what it has been recently. This will more evenly distribute trades across time. Many
+applications find this useful.
+Scaling is often useful for ensuring cross-market conformity. If we want to pool predictor data
+from several different markets, it is vital that the statistical properties of the predictors be similar
+for all markets. Otherwise, some markets will dominate models, while other markets may be
+essentially ignored. For example, suppose we measure recent price movement as an indicator.
+Markets having high volatility will produce values of this indicator that have much more
+variability than low-volatility markets. By scaling the indicator according to its historical
+volatility, we produce a variable that is likely to have similar variability across markets.
+-27-
+(1)
+Since centering and scaling are often both valuable, it is useful to combine them into a single
+process called normalization. In most cases, applying this normalization using a historical window
+of approximately one year can greatly improve the utility of a variable compared to using it in
+its raw form.
+When historical scaling or normalization (centering plus scaling) is performed, an additional step
+of transformation follows. Let F25, F50, and F75 be the 25'th, 50'th, and 75'th percentiles,
+respectively. Let Ö(•) be the standard normal CDF. Then the actual normalized variable is
+defined by Equation 1, where c=0.25 for SCALING and 0.5 for NORMALIZATION.
+This variable is strictly bounded in the range -50 to 50, although the vast majority of cases will
+lie well within these bounds and little compression will occur.
+-28-
+Cross-Market Normalization
+In multiple-market scenarios there is a type of normalization that is frequently useful. Cross-
+Market Normalization is applied to a variable by including an exclamation point (!) followed by
+a fraction 0-1 after the variable definition and any normalization.
+When this is done, the variable (which may or may not have centering, scaling, or combined
+normalization) is computed for every market for which data is available. The values are ranked
+across all of the markets, and the percentile rank for each market is computed. The final value
+of this variable is defined by subtracting 50 from the percentile. Thus, a cross-marketnormalized
+variable ranges from -50 to 50. The market having minimum value of the variable
+is assigned a value of -50. The max market gets 50. Markets near the middle of the range will
+obtain values near zero.
+The fraction 0-1 in this command specifies the minimum fraction of the markets that must be
+present in order for this value to be computed. Some markets may begin their history later than
+other markets, or end earlier. If too few markets are present on a given date, this variable would
+not have much meaning. Thus, if the minimum fraction is not met, the variable is not computed
+and is recorded as missing.
+For example, suppose we have 20 markets, and we end a variable definition (maybe having
+historical normalization, or maybe not) with ! 0.6. For every day in which 06.*20=12 markets
+have history, the variable will be cross-market normalized.
+-29-
+Pooled Variables
+We’ve already seen that an Index Market (Page 26) is a way of importing summary information
+for all markets in a multiple-market situation. Also, Cross-Market Normalization (Page 29) is a
+method for computing within the program new variables that take into account all markets on
+each day. Another technique for extracting information on the behavior of multiple markets is
+to use Pooled Variables. This is done by including the keyword POOLED followed by the type
+of pooling to be done, followed by the minimum fraction (0-1) of markets that must be present,
+as in computing cross-sectional normalization. These specifications must come last on a line,
+after the variable definition and any normalization. Pooling and cross-market normalization may
+not be performed simultaneously. The following pooling types are available:
+MEAN - The mean
+MEDIAN - The median
+IQRANGE - The interquartile range
+SCALED MEDIAN - The median divided by the interquartile range
+SKEWNESS - A nonparametric measure of skewness
+KURTOSIS - A nonparametric measure of kurtosis
+STDDEV - The standard deviation
+CLUMP60 - If the 40'th percentile is positive (meaning that at least 60 percent of the markets
+have a positive value) this is the 40'th percentile. If the 60'th percentile is negative, this
+is the 60'th percentile. Otherwise it is zero. This variable measures the degree to which
+the markets are moving in conformity.
+Note that all of these variables except MEAN, MEDIAN, IQRANGE, and STDDEV are scaled
+and slightly transformed so that in most situations their natural range will be approximately -50
+to 50. For MEAN pooling, no additional scaling beyond that for the source variable is applied.
+Because TSSB library variables are, in all but pathological situations, already well scaled, the
+pooled mean and median will generally also be well scaled. STDDEV and IQRANGE are also
+not scaled, because users who employ these variables may want them to reflect the actual values
+of the indicator so as to make it conformable with the mean.
+-30-
+Mahalanobis Distance
+A surprising world event or some other destabilizing influence can cause a sudden dramatic
+change in market behavior. This can be measured for an individual market by a jump in a
+traditional volatility indicator. But in a multiple-market scenario we can compute a more
+sophisticated turbulence measure by taking into account not only how much market prices
+change relative to their historical norm, but also by how their interrelationships change. For
+example, suppose two markets normally move together. If they suddenly diverge, this may
+indicate a major market upheaval of some sort.
+A standard mathematical technique for quantifying change in terms of not only individual
+components but interrelationships as well is the Mahalanobis Distance that separates a vector (in
+this context, a set of market prices in a single bar) from its historical mean, with historical
+covariance taken into account. This can be accomplished for any variable by following the
+variable definition with the keyword MAHALANOBIS and the number of bars to look back
+when computing the mean and covariance. In order to compute the value for daily price
+changes, which is the most usual situation, you would use the CLOSE TO CLOSE variable. So,
+for example, suppose you are working with daily data, and you want means and covariances to
+be computed for a window of approximately one year. The variable definition line might look
+like this:
+YEAR_MAHAL: CLOSE TO CLOSE MAHALANOBIS 250
+Don’t feel limited to daily price changes, though. Other indicators, such as trend or volatility,
+may prove to be useful raw material for measuring turbulence.
+The Lookback must be at least ten more than the number of markets, and preferably much more
+than that for stability.
+-31-
+Absorption Ratio
+Many experts believe that financial markets are most stable when the individual components are
+moving relatively independently. When the components become locked together in consistent
+patterns, a situation called coherence, the market becomes unstable; a small shock to the system
+can spread chaos throughout its components as they disentangle.
+The degree of market coherence can be measured by examining the eigenvalues of the
+covariance matrix of the market components. If all components are completely independent,
+so that all correlations are zero, the eigenvalues are equal. If all components move exactly
+together (all correlations are plus or minus one), all variance is contained in one eigenvalue; the
+other eigenvalues are zero. Intermediate degrees of coherence cause degrees of concentration
+of variance in few eigenvalues.
+This leads us to an intuitive and effective way to measure coherence: compute the fraction of
+the total variance that is contained in the few largest eigenvalues. This ratio will range from a
+minimum of number kept /number of markets when all components are independent, to one when
+all components move in perfect lockstep. ABSRATIO (absorption ratio) is a family of variables
+to accomplish this. The general format is as follows:
+Us e rNam e : Variab le ABSRATIO Lo o kb ac k Frac tio n Sh o rtMA Lo n g MA
+This command follows the same pattern as other cross-market variables: The user names and
+defines a built-in variable, and then the keyword ABSRATIO follows, along with its four
+parameters.
+Lookback is the number of bars to include in the moving window used to compute the
+covariance matrix. Fraction is the fraction (0-1) of the eigenvalues to use for computing the
+absorption ratio. Kritzman et al use 0.2. If LongMA and ShortMA are zero, the value computed
+is the absorption ratio, the fraction of the total variance accounted for by the Fraction largest
+eigenvalues. If LongMA and ShortMA are nonzero, the variable is what Kritzman et al call the
+Shift. It is the short-term moving average of the absorption ratio, minus the long-term, scaled
+by the standard deviation of the absorption ratio during the long-term time period.
+Any predefined TSSB variable can be used to compute the absorption ratio, but in order to
+implement the algorithm of Kritzman et al, the CLOSE TO CLOSE variable should be used.
+Here are two examples. Both use a lookback window of 250 bars and the fraction 0.2 of the
+eigenvalues. The first example computes the absorption ratio, and the second computes the
+shift using a short-term MA of 20 bars and a long-term MA of 100 bars.
+YEAR_ABSRT: CLOSE TO CLOSE ABSRATIO 250 0.2 0 0
+YEAR_SHIFT: CLOSE TO CLOSE ABSRATIO 250 0.2 20 100
+-32-
+Note that in order to compute the absorption ratio for a case, valid data for all markets must be
+present for every date in the lookback period. This is a severe restriction. There are two major
+ways in which the lookback period might have missing data:
+1) Markets might exist for non-overlapping time periods. For example, suppose you are
+processing the components of an index such as the S&P 100. Many of its current components
+did not exist a few years ago. Thus, the first date on which all markets could have data will be
+the date on which the most recently ‘born’ market has its first price information. This could
+easily leave only a small subset of the data that would otherwise be available. For this reason it
+is best to check the starting and ending dates of all markets and process only markets that have
+substantial overlap. All dates outside the time period in which all markets have data will be
+excluded.
+2) The CLEAN RAW DATA command (Page 34) will eliminate data which has a suspiciously
+large bar-to-bar price jump. If even one market has missing data due to this command for any
+date in the lookback period behind the current date, the absorption ratio will not be computed
+for the current date. For this reason, the CLEAN RAW DATA command should use as small
+a parameter value as possible, perhaps 0.4 or even less.
+The Lookback must be at least ten more than the number of markets, and preferably much more
+than that for stability.
+-33-
+Residuals
+If the user is performing trade filtering (Page 186) then the keyword RESIDUAL may appear
+as the final text on a variable definition for a predicted variable. The result is that the filter value
+or fractile is subtracted from the target value. See Page 186 for more details.
+Errors in the Raw Market Data
+Historical data files can occasionally contain data that is unusually extreme. Such extremes may
+be due to real events that are so rare that they should be ignored, or they may be due to actual
+errors. In order to prevent this data from generating outlier cases that may adversely affect
+models, the user can specify the following command b e fo re the variable list file is read. If the
+ratio of a day’s close to the prior day’s close is less than the specified fraction (0-1), or greater
+than its reciprocal, no case that references this day will be generated. About 0.6 is reasonable.
+CLEAN RAW DATA Fraction ;
+-34-
+(2)
+Families of Variables
+This section discusses the various families of predictor and predicted variables.
+CLOSE TO CLOSE ATRlength
+This trivial indicator is 100 times the log ratio of today’s close to yesterday’s close. If an
+ATRlength is specified this indicator will be divided by the ATR with specified lookback.
+CLOSE MINUS MOVING AVERAGE HistLength ATRlength
+This predictor variable measures today’s market position relative to its recent history, normalized
+by recent Logarithmic Average True Range. Let Ci be the close at a historical distance of i (where
+i=0 is today after the market has closed), let n be the specified historical length, and let m be the
+historical extent over which logarithmic ATR is computed. This variable is defined as follows,
+with a modest compressing transform applied to limit it to a range of -50 to 50:
+If today’s close exactly equals the recent moving average, this variable will have a value of zero.
+If the price is higher, the variable will be positive, and if lower, negative. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to this variable. For input list
+families (see Page 160), the LOOKBACK is HistLength.
+MA DIFFERENCE ShortLength LongLength Lag
+A short-term moving average and a long-term moving average, the latter lagged by the specified
+amount, are computed for closing prices. Typically, the lag will equal the short length, thus
+making the two windows disjoint. The long-term MA is subtracted from the short-term MA,
+and this difference is divided by the average true range measured across the LongLength+Lag
+history. Finally, this normalized difference is slightly compressed to a range of -50 to 50. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is LongLength + Lag.
+-35-
+ABS PRICE CHANGE OSCILLATOR ShortLength Multiplier
+A ShortLength moving average of absolute log daily price changes is computed. The same is done
+for a length of ShortLength times Multiplier. The long-term MA is subtracted from the short-term
+MA, and this difference is divided by the average true range measured across the longer history.
+Finally, this normalized difference is slightly compressed to a range of -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is LongLength.
+LINEAR PER ATR HistLength ATRlength
+This predictor variable computes a least-squares straight line over the specified length of
+historical data. The data which is fit is the log of the mean of the open, high, low, and close.
+It also computes the Average True Range over the specified ATR history length. The returned
+value is the slope of the line divided by the ATR. This is sometimes called price velocity. A
+small amount of compression and rescaling is applied to restrain values to the interval -50 to 50.
+The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this
+variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+QUADRATIC PER ATR HistLength ATRlength
+This predictor variable computes a least-squares fit of a second-order Legendre polynomial (an
+orthogonal family) over the specified length of historical data. It also computes the Average
+True Range over the specified ATR history length. The returned value is the polynomial
+coefficient divided by the ATR. This is sometimes called price acceleration. A small amount
+of compression and rescaling is applied to restrain values to the interval -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is HistLength.
+CUBIC PER ATR HistLength ATRlength
+This predictor variable computes a least-squares fit of a third-order Legendre polynomial (an
+orthogonal family) over the specified length of historical data. It also computes the Average
+True Range over the specified ATR history length. The returned value is the polynomial
+coefficient divided by the ATR. A small amount of compression and rescaling is applied to
+restrain values to the interval -50 to 50. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is HistLength.
+-36-
+RSI HistLength
+This is the ordinary Relative Strength Indicator proposed by J. Welles Wilder, Jr. It is computed
+as described in The Encyclopedia of Technical Market Indicators by Colby and Meyers, with one
+exception. That reference uses an ordinary moving average for smoothing, while most modern
+references claim that exponential smoothing give superior results, so that’s what is done here.
+Actually, it’s hard to tell the two apart, so in reality the difference is probably inconsequential in
+most applications.
+HI_RSI HistLength
+This is identical to RSI except that at each step the high of the current bar is compared to the
+close of the prior bar. As a result, there is a strong prejudice toward very large values of this
+indicator (most ‘moves’ are up), with a large percentage of values often being 100 or nearly 100.
+LO_RSI HistLength
+This is identical to RSI except that at each step the low of the current bar is compared to the
+close of the prior bar. As a result, there is a strong prejudice toward very small values of this
+indicator (most ‘moves’ are down), with a large percentage of values often being 0 or nearly 0.
+COND_RSI HistLength
+This is identical to RSI except that at each step we check the position of the close relative to that
+day’s high-low range. If the current bar closes in the bottom quartile of the day’s range, the low
+of the bar is compared to the prior close. If the current bar closes in the top quartile of the day’s
+range, the high of the bar is compared to the prior close. Otherwise we use the close, as for the
+usual RSI.
+STOCHASTIC K HistLength
+STOCHASTIC D HistLength
+These are the first-order smoothed (K) and second-order smoothed (D) Lane Stochastics as
+proposed by George C. Lane. The algorithm used here is from The Encyclopedia of Technical
+Market Indicators by Colby and Meyers.
+-37-
+(3)
+(4)
+PRICE MOMENTUM HistLength StdDevLength
+This measures the price today relative to the price HistLength days ago. It is normalized by the
+standard deviation of daily price changes, and also normalized to account for the lookback
+distance. Let Pi be the mean of the open, high, low, and close i days ago, where i=0 is today
+after the market is closed. Let n be the lookback distance HistLength, and let m be the number
+of days used to compute the standard deviation, StdDevLength. This variable is defined by
+Equation 3. A small amount of compression and recaling is applied to restrain values to the
+interval -50 to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+LINEAR DEVIATION HistLength
+A least-squares line is fit to the most recent HistLength log prices, including that of today. The
+returned value is today’s price minus the fitted line’s value for today, divided by the standard
+error of the fit. A modest compressing transform is applied to limit the range to the interval -50
+to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to
+this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+QUADRATIC DEVIATION HistLength
+A least-squares quadratic polynomial is fit to the most recent HistLength log prices, including that
+of today. The returned value is today’s price minus the fitted line’s value for today, divided by
+the standard error of the fit. A modest compressing transform is applied to limit the range to
+the interval -50 to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+-38-
+CUBIC DEVIATION HistLength
+A least-squares cubic polynomial is fit to the most recent HistLength log prices, including that of
+today. The returned value is today’s price minus the fitted line’s value for today, divided by the
+standard error of the fit. A modest compressing transform is applied to limit the range to the
+interval -50 to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+DEVIATION FROM INDEX FIT HistLength MovAvgLength
+A least-squares line is computed for predicting the log price (mean of open, high, low, and close)
+of the current market from the log price of the index market. (The index market must be
+specified using the INDEX IS command discussed on Page 6.) The fit is over the specified
+history length, including today. This variable is today’s log price minus its predicted value,
+normalized by the standard error of the fit and slightly compressed to the range -50 to 50. If
+MovAvgLength is greater than one, a moving average of the variable is taken before compression.
+For input list families (see Page 160), the LOOKBACK is HistLength. If the user employs more
+than one index market, INDEX1 is used for this variable. Currently there is no way to specify
+any other index, although this feature could be added later if it becomes necessary.
+INDEX CORRELATION HistLength
+The ordinary correlation coefficient is computed between the log price (mean of open, high, low,
+and close) of the current market and the log price of the index market. (The index market must
+be specified using the INDEX IS command discussed on Page 6.) The correlation is over the
+specified history length, including today. This variable is the correlation times 50, which
+provides a range of -50 to 50. For input list families (see Page 160), the LOOKBACK is
+HistLength. If the user employs more than one index market, INDEX1 is used for this variable.
+Currently there is no way to specify any other index, although this feature could be added later
+if it becomes necessary.
+DELTA INDEX CORRELATION HistLength DeltaLength
+This is the INDEX CORRELATION today minus that DeltaLength days ago.
+-39-
+ADX HistLength
+The ADX trend indicator for the specified history length is computed. Unlike most other
+indicators, ADX is neither scaled nor transformed. It retains its defined range of 0-100. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is HistLength.
+MIN ADX HistLength MinLength
+The ADX trend indicator is computed for the current day as well as prior days, for a total of
+MinLength times. The minimum value across these times is found. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is HistLength.
+RESIDUAL MIN ADX HistLength MinLength
+The ADX trend indicator is computed for the current day as well as prior days, for a total of
+MinLength times. The minimum value across these times is found. The final variable is today’s
+value minus the minimum. The IS INDEX or MINUS INDEX modifiers described on Page
+26 may be applied to this variable. For input list families (see Page 160), the LOOKBACK is
+HistLength.
+MAX ADX HistLength MaxLength
+The ADX trend indicator is computed for the current day as well as prior days, for a total of
+MaxLength times. The maximum value across these times is found. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is HistLength.
+RESIDUAL MAX ADX HistLength MaxLength
+The ADX trend indicator is computed for the current day as well as prior days, for a total of
+MaxLength times. The maximum value across these times is found. The final variable is the
+maximum value minus today’s value. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is HistLength.
+-40-
+DELTA ADX HistLength DeltaLength
+The ADX trend indicator is computed for today and for the day DeltaLength ago. The final
+variable is today’s minus the lagged value, slightly transformed and scaled to a range of -50 to
+50. This measures the rate of change of ADX, its velocity. The IS INDEX or MINUS INDEX
+modifiers described on Page 26 may be applied to this variable. For input list families (see Page
+160), the LOOKBACK is HistLength.
+ACCEL ADX HistLength DeltaLength
+The ADX trend indicator is computed for today and for the day DeltaLength ago and for the day
+2*DeltaLength ago. The final variable is today’s value plus the doubly lagged value, minus twice
+the single-lagged value, slightly transformed and scaled to a range of -50 to 50. This measures
+the curvature or acceleration of the ADX function, the rate at which ADX velocity is changing.
+The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this
+variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+INTRADAY INTENSITY HistLength
+The smoothed intraday intensity statistic is returned. First, the true range is computed as the
+greatest of (today’s high minus today’s low), (today’s high minus yesterday’s close), and
+(yesterday’s close minus today’s low). Then today’s change is computed as today’s close minus
+today’s open. The intraday intensity is defined as the ratio of the latter to the former. This
+quantity is computed over the specified history length, and the moving average returned after
+being slightly transformed and rescaled to the range -50 to 50. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is HistLength.
+DELTA INTRADAY INTENSITY HistLength DeltaLength
+This is the difference between today’s INTRADAY INTENSITY and that the specified number
+of days ago. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+-41-
+PRICE VARIANCE RATIO HistLength Multiplier
+This is the ratio of the variance of the log of closing prices over a short time period to that over
+a long time period. It is transformed and scaled to a range of -50 to 50. The short time period
+is specified as HistLength, and the long time period is HistLength times Multiplier. The IS INDEX
+or MINUS INDEX modifiers described on Page 26 may be applied to this variable. For input
+list families (see Page 160), the LOOKBACK is HistLength times Multiplier.
+MIN PRICE VARIANCE RATIO HistLen Mult Mlen
+MAX PRICE VARIANCE RATIO HistLen Mult Mlen
+This is the minimum or maximum of the PRICE VARIANCE RATIO over the prior Mlength
+observations. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+CHANGE VARIANCE RATIO HistLength Multiplier
+This is identical to PRICE VARIANCE RATIO except that the quantity whose variance is
+computed is the log ratio of each day’s close to that of the prior day. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is HistLength times Multiplier.
+MIN CHANGE VARIANCE RATIO HistLen Mult Mlen
+MAX CHANGE VARIANCE RATIO HistLen Mult Mlen
+This is the minimum or maximum of the CHANGE VARIANCE RATIO over the prior
+Mlength observations. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+-42-
+ATR RATIO HistLength Multiplier
+This is the ratio of the Average True Range over a short time period to that over a long time
+period. It is transformed and scaled to a range of -50 to 50. The short time period is specified
+as HistLength, and the long time period is HistLength times Multiplier. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is HistLength.
+DELTA PRICE VARIANCE RATIO HistLength Multiplier
+This is the difference between the PRICE VARIANCE RATIO today minus that HistLength
+times Multiplier days ago. The IS INDEX or MINUS INDEX modifiers described on Page 26
+may be applied to this variable. For input list families (see Page 160), the LOOKBACK is
+HistLength times Multiplier.
+DELTA CHANGE VARIANCE RATIO HistLength Multiplier
+This is the difference between the CHANGE VARIANCE RATIO today minus that HistLength
+times Multiplier days ago. The IS INDEX or MINUS INDEX modifiers described on Page 26
+may be applied to this variable. For input list families (see Page 160), the LOOKBACK is
+HistLength times Multiplier.
+DELTA ATR RATIO HistLength Multiplier
+This is the difference between the ATR RATIO today minus that HistLength times Multiplier days
+ago. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this
+variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+BOLLINGER WIDTH HistLength
+The mean and standard deviation of closing prices is computed for the specified history length.
+The value of this variable is the log of the ratio of the standard deviation to the mean. Note that
+this variable is extremely poorly behaved in nearly every regard. Temporal normalization (Page
+27) is mandatory. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength.
+-43-
+DELTA BOLLINGER WIDTH HistLength DeltaLength
+This is the difference between the BOLLINGER WIDTH today minus that DeltaLength days
+earlier. Temporal normalization (Page 27) is mandatory. The IS INDEX or MINUS INDEX
+modifiers described on Page 26 may be applied to this variable. For input list families (see Page
+160), the LOOKBACK is HistLength.
+PRICE SKEWNESS HistLength Multiplier
+This computes a quantile-based measure of the skewness of the price distribution with a
+lookback period of HistLength days. This variable ranges from -50 to 50, with a value of zero
+implying symmetry. If a multiplier greater than one is specified, the skewness with a lookback
+period of HistLength times Multiplier is also computed, and the variable is the skewness of the
+shorter period relative to that of the longer period. A recent increase in skewness results in a
+positive value for this variable. The IS INDEX or MINUS INDEX modifiers described on
+Page 26 may be applied to this variable. For input list families (see Page 160), the LOOKBACK
+is HistLength times Multiplier.
+CHANGE SKEWNESS HistLength Multiplier
+This is identical to PRICE SKEWNESS except that the quantity evaluated is the daily price
+changes (today’s close relative to yesterday’s close) rather than the prices themselves. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is HistLength times Multiplier.
+PRICE KURTOSIS HistLength Multiplier
+This is identical to PRICE SKEWNESS except that the kurtosis (tail weight) rather than the
+skewness is measured. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+-44-
+CHANGE KURTOSIS HistLength Multiplier
+This is identical to CHANGE SKEWNESS except that the kurtosis (tail weight) rather than the
+skewness is measured. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+DELTA PRICE SKEWNESS HistLength Multiplier DeltaLength
+DELTA CHANGE SKEWNESS HistLength Multiplier DeltaLength
+DELTA PRICE KURTOSIS HistLength Multiplier DeltaLength
+DELTA CHANGE KURTOSIS HistLength Multiplier DeltaLength
+These compute the difference between the current value of the specified variable and its value
+DeltaLength days ago. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+VOLUME MOMENTUM HistLength Multiplier
+This computes the Histlength moving average of volume, as well as that over a length of
+HistLength times Multipler. The variable is the ratio of the former (short term) to the latter (long
+term), transformed to a range of -50 to 50. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is HistLength times Multiplier.
+DELTA VOLUME MOMENTUM HistLen Multiplier DeltaLen
+This is the VOLUME MOMENTUM today minus that DeltaLen days ago, transformed to a
+range of -50 to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is HistLength
+times Multiplier.
+-45-
+PRICE ENTROPY WordLength
+This computes the binary entropy of price changes, transformed and slightly compressed to the
+range -50 to 50. The number of days used in the computation is ten times two to the power
+WordLength. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is ten times two
+to the power of WordLength.
+VOLUME ENTROPY WordLength
+This computes the binary entropy of volume changes, transformed and slightly compressed to
+the range -50 to 50. The number of days used in the computation is ten times two to the power
+WordLength. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. For input list families (see Page 160), the LOOKBACK is ten times two
+to the power of WordLength.
+PRICE MUTUAL INFORMATION WordLength
+This computes the binary mutual information between today’s price change relative to
+yesterday’s, and WordLength prior days’ price changes, transformed and slightly compressed to
+the range -50 to 50. The number of days used in the computation is ten times two to the power
+(one plus WordLength). The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. For input list families (see Page 160), the LOOKBACK is ten times
+two to the power of (one plus WordLength).
+VOLUME MUTUAL INFORMATION WordLength
+This is identical to PRICE MUTUAL INFORMATION except that volume is used instead of
+price.
+-46-
+REAL MORLET Period
+The real component of a Morlet wavelet, slightly transformed to a range of -50 to 50, is
+computed for the log of closing prices. The wavelet is centered 2 * Period days prior to the
+current day. This roughly measures the position of the price within a periodic waveform of
+approximately the specified period. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is four times the Period.
+REAL DIFF MORLET Period
+The real component of a Morlet wavelet is computed for the log of closing prices. The wavelet
+is centered 2 * Period days prior to the current day. The same quantity is computed for twice the
+period, though the lag is the same. The long-period quantity is subtracted from the short-period.
+This roughly measures whether the fast motion is pushing beyond or lagging behind the slow
+motion. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied
+to this variable. For input list families (see Page 160), the LOOKBACK is four times the Period.
+REAL PRODUCT MORLET Period
+The real component of a Morlet wavelet is computed for the log of closing prices. The wavelet
+is centered 2 * Period days prior to the current day. The same quantity is computed for twice the
+period, though the lag is the same. If the two quantities have opposite signs, the value of the
+variable is zero. Otherwise, the value is their product with their sign preserved. This roughly
+measures whether the fast motion and the slow motion are in agreement, with the sign telling
+the direction of the common motion. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is four times the Period.
+IMAG MORLET Period
+IMAG DIFF MORLET Period
+IMAG PRODUCT MORLET Period
+These are identical to the real versions, but they compute the imaginary version. Roughly
+speaking, the real coefficient measures position, while the imaginary coefficient measures
+velocity.
+-47-
+PHASE MORLET Period
+This is the rate of change of the phase, transformed and scaled to a range of -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is four times the Period.
+DAUB MEAN HistLength Level
+A Daubechies wavelet is computed for the log of daily close ratios (today divided by yesterday)
+over HistLength days. HistLength must be a power of two. If not, it is increased to the next
+power of two. The level must be 1, 2, 3, or 4, with larger values resulting in more smoothing
+and noise elimination. Two to the power of (Level +1) must be less than or equal to HistLength.
+Li, Shi, and Li recommend that HistLength be approximately three times the number of days we
+will predict into the future. They also recommend that Level be two, because a value of one
+results in too much noise being retained, while values larger than two result in loss of useful
+information. I recommend that we do our own experiments to choose optimal values. The
+DAUB MEAN variable is the mean of the smooth (parent wavelet) coefficients, with the detail
+coefficients ignored. It is also transformed to a range of -50 to 50. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. For input list families
+(see Page 160), the LOOKBACK is the HistLength.
+DAUB MIN HistLength Level
+This is identical to DAUB MEAN except that the minimum rather than the mean is returned.
+DAUB MAX HistLength Level
+This is identical to DAUB MEAN except that the maximum rather than the mean is returned.
+DAUB STD HistLength Level
+This is identical to DAUB MEAN except that the standard deviation rather than the mean is
+returned.
+-48-
+DAUB ENERGY HistLength Level
+This is identical to DAUB MEAN except that the sum of squared coefficients rather than the
+mean is returned.
+DAUB NL ENERGY HistLength Level
+This is identical to DAUB MEAN except that the sum of squared differences between
+neighbors rather than the mean is returned.
+DAUB CURVE HistLength Level
+This is identical to DAUB MEAN except that the sum of absolute differences between
+neighbors rather than the mean is returned.
+VOLUME WEIGHTED MA OVER MA HistLength
+This is the log of the ratio of the volume-weighted moving average to the ordinary moving
+average. It is slightly compressed and transformed to a range of -50 to 50. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to this variable. For input list
+families (see Page 160), the LOOKBACK is the HistLength.
+DIFF VOLUME WEIGHTED MA OVER MA ShortDist LongDist
+This is the log of the ratio of the volume-weighted moving average to the ordinary moving
+average over ShortDist days, minus that over LongDist days. It is slightly compressed and
+transformed to a range of -50 to 50. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is the ShortDist.
+-49-
+PRICE VOLUME FIT HistLength
+This is the slope of the least-squares regression line for predicting log closing price from log
+volume. It is slightly transformed to the range -50 to 50. The IS INDEX or MINUS INDEX
+modifiers described on Page 26 may be applied to this variable. For input list families (see Page
+160), the LOOKBACK is the HistLength.
+DIFF PRICE VOLUME FIT ShortDist LongDist
+This is the PRICE VOLUME FIT computed over ShortDist days, mius that over LongDist days.
+It is slightly transformed to the range -50 to 50. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is the ShortDist.
+DELTA PRICE VOLUME FIT HistLength DeltaDist
+This is the PRICE VOLUME FIT computed over HistLength days minus the same quantity
+computed at a lag of DeltaDist days. It is slightly transformed to the range -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+REACTIVITY HistLength
+This is the REACTIVITY technical indicator computed over the specified history length. It is
+slightly transformed to the range -50 to 50. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is the HistLength.
+DELTA REACTIVITY HistLength DeltaDist
+This is the REACTIVITY computed over HistLength days minus the same quantity computed
+at a lag of DeltaDist days. It is slightly transformed to the range -50 to 50. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to this variable. For input list
+families (see Page 160), the LOOKBACK is the HistLength.
+-50-
+MIN REACTIVITY HistLength MinMaxDist
+MAX REACTIVITY HistLength MinMaxDist
+This is the minimum (or maximum) of HistLength REACTIVITY with the minimum or
+maximum taken over MinMaxDist days. It is slightly transformed to the range -50 to 50. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+ON BALANCE VOLUME HistLength
+This is the ON BALANCE VOLUME technical indicator computed over HistLength
+days. It is slightly transformed to the range -50 to 50. The IS INDEX or MINUS INDEX
+modifiers described on Page 26 may be applied to this variable. For input list families (see Page
+160), the LOOKBACK is the HistLength.
+DELTA ON BALANCE VOLUME HistLength DeltaDist
+This is the ON BALANCE VOLUME computed over HistLength days minus the same quantity
+computed at a lag of DeltaDist days. It is slightly transformed to the range -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+POSITIVE VOLUME INDICATOR HistLength
+This is the average over the specified number of days of relative price change (yesterdays’ close
+to today’s close), where only changes corresponding to increased volume are taken into
+consideration. In order to provide cross-market conformity (which is terrible in its raw form),
+this average is normalized by dividing by the standard deviation of price changes taken over a
+history of 2*HistLength or 250 days, whichever is longer. It is slightly transformed to the range
+-50 to 50. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied
+to this variable. For input list families (see Page 160), the LOOKBACK is the HistLength.
+-51-
+DELTA POSITIVE VOLUME INDICATOR HistLength DeltaDist
+This is the POSITIVE VOLUME INDICATOR computed over HistLength days minus the same
+quantity computed at a lag of DeltaDist days. It is slightly transformed to the range -50 to 50.
+The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this
+variable. For input list families (see Page 160), the LOOKBACK is the HistLength.
+NEGATIVE VOLUME INDICATOR HistLength
+DELTA NEGATIVE VOLUME INDICATOR HistLen DeltaDist
+These are identical to the prior POSITIVE versions, except that price changes are considered
+only when they correspond to decreasing volume.
+PRODUCT PRICE VOLUME HistLength
+For each day, today’s volume is normalized by dividing it by the median of the prior 250 day’s
+volumes. Thus, if today’s volume is ‘average’ the result will be one. If today’s volume is
+unusually small, the result will be near zero, and if unusually large, it will be much greater than
+one.
+Today’s price change (log of the ratio of today’s close to yesterday’s close) is normalized by
+subtracting the median of this quantity over the prior 250 days and dividing by the interquartile
+range.
+The PRODUCT PRICE VOLUME indicator is computed as the product of the normalized
+price and the normalized volume. It is slightly transformed to the range -50 to 50. The IS
+INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+SUM PRICE VOLUME HistLength
+Today’s price change and volume are normalized as in the PRODUCT PRICE VOLUME
+indicator. The SUM PRICE VOLUME indicator is computed as the sum of the normalized
+volume and the absolute value of the normalized price. If the normalized price change is
+negative, the sign of the sum is flipped. It is slightly transformed to the range -50 to 50. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+-52-
+DELTA PRODUCT PRICE VOLUME HistLength DeltaDist
+DELTA SUM PRICE VOLUME HistLength DeltaDist
+These are the PRODUCT PRICE VOLUME and SUM PRICE VOLUME indicators computed
+over HistLength days minus the same quantity computed at a lag of DeltaDist days. It is slightly
+transformed to the range -50 to 50. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. For input list families (see Page 160), the
+LOOKBACK is the HistLength.
+N DAY HIGH HistLength
+Let N be the number of days one has to go back in order to find a price higher than today’s
+high. Search only HistLength days back. If after this many days are checked, no higher high is
+found, set N=HistLength+1. Then this variable is defined as 100 * (N-1) / HistLength - 50. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+For input list families (see Page 160), the LOOKBACK is the HistLength.
+N DAY LOW HistLength
+This is identical to N DAY HIGH except that we search for lower prices.
+N DAY NARROWER HistLength
+Let N be the number of days one has to go back in order to find a true range less than today’s
+true range. True range is defined as the maximum of today’s high minus today’s low, today’s
+high minus yesterday’s close, and yesterday’s close minus today’s low. Search only HistLength
+days back. If after this many days are checked, no smaller true range is found, set
+N=HistLength+1. Then this variable is defined as 100 * (N-1) / HistLength - 50. The IS INDEX
+or MINUS INDEX modifiers described on Page 26 may be applied to this variable. For input
+list families (see Page 160), the LOOKBACK is the HistLength.
+N DAY WIDER HistLength
+This is identical to N DAY NARROWER except that we search for greater true range.
+-53-
+FTI family... BlockSize HalfLength LowPeriod HighPeriod
+The next 14 variables are members of the Govinda Khalsa FTI family. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to these variables. They have
+several things in common.
+! The first parameter is the length of the moving-window block (called BlockSize later),
+which for input list families (see Page 160) is the LOOKBACK.
+! The second parameter is the half-length of the filter, the number of data points on each
+side of the center point from which a filtered value is computed. This value must be
+considerably less than the BlockSize. Setting the HalfLength equal to half of the BlockSize
+is a reasonable choice.
+! The third parameter is the period of the minor (faster; shorter period) filter, or the period
+of the only filter for those variables that use a single filter. This is the period at which
+a cyclic quantity is attenuated to approximately half its value.
+! The fourth parameter, if used, is the period of the major (slower; longer period) filter.
+Obviously, it must exceed LowPeriod. It must also be less than or equal to twice the
+HalfLength. For best performance, it should be quite a bit less.
+! The BlockSize minus the HalfLength is the number of points in the channel for which FTI
+variables are computed. Obviously, this difference must be at least 2. Preferably it
+should be at least several dozen.
+! All FTI variables are based on the log of the closing price.
+FTI LOWPASS BlockSize HalfLength Period
+Gavinda Khalsa’s zero-lag lowpass filter is applied to the log of closing prices. The most likely
+use for this quantity would be as part of an oscillator crossover system.
+FTI MINOR LOWPASS BlockSize HalfLength LowPeriod HighPeriod
+A pair of lowpass filters is computed according to the Govinda-Khalsa rules. The periods are
+restricted to the specified range. This returns the minor filter value. In all likelihood, this
+quantity is useful for display and diagnostic purposes only.
+-54-
+FTI MAJOR LOWPASS BlockSize HalfLength LowPeriod HighPeriod
+As above, except the major filter value is returned.
+FTI FTI BlockSize HalfLength Period
+This returns the FTI value at the specified period. This may be the single most useful FTI
+variable, because it allows the user to bypass the unstable and often unpredictable automated
+period selection algorithm and directly specify a period that is tailored to the application.
+FTI LARGEST FTI BlockSize HalfLength LowPeriod HighPeriod
+This returns the value of the largest FTI within the specified range of periods (inclusive).
+FTI MINOR FTI BlockSize HalfLength LowPeriod HighPeriod
+A pair of lowpass filters is computed according to the Govinda-Khalsa rules. The periods are
+restricted to the specified range. This returns the FTI for the minor (smaller period) filter.
+FTI MAJOR FTI BlockSize HalfLength LowPeriod HighPeriod
+As above, but returns the FTI of the major filter.
+FTI LARGEST PERIOD BlockSize HalfLength LowPeriod HighPeriod
+This returns the period, within the inclusive specified range, which corresponds to the largest
+FTI value.
+FTI MINOR PERIOD BlockSize HalfLength LowPeriod HighPeriod
+A pair of lowpass filters is computed according to the Govinda-Khalsa rules. The periods are
+restricted to the specified range. This returns the period of the minor (smaller period) filter.
+-55-
+FTI MAJOR PERIOD BlockSize HalfLength LowPeriod HighPeriod
+As above, except the major period is returned.
+FTI CRAT BlockSize HalfLength LowPeriod HighPeriod
+The minor/major channel ratio for the specified pair of periods is returned. This variable nicely
+complements the FTI FTI variable, because the exact periods can be provided to best fit the
+application.
+FTI MINOR BEST CRAT BlockSize HalfLength LowPeriod HighPeriod
+The minor/major channel ratio is returned. The major period is fixed at HighPeriod, and the
+Govinda-Khalsa algorithm chooses the best minor period. This is what they do in their paper.
+They fix the major period at 65 and find the best associated minor period.
+FTI MAJOR BEST CRAT BlockSize HalfLength LowPeriod HighPeriod
+The minor/major channel ratio is returned. The minor period is fixed at LowPeriod, and the
+Govinda-Khalsa algorithm chooses the best major period.
+FTI BOTH BEST CRAT BlockSize HalfLength LowPeriod HighPeriod
+The minor/major channel ratio is returned. The Govinda-Khalsa algorithm chooses the best
+minor and major periods.
+DETRENDED RSI DetrendedLength DetrenderLength Lookback
+RSI at the two specified lengths are computed and a least-squares regression line is fit for
+predicting that of DetrendedLength from that of DetrenderLength. This least-squares fit is based on
+RSIs over the specified Lookback period. The value returned is the DetrendedLength RSI minus
+its predicted value. The only exception is that when DetrendedLength is 2, an inverse logistic
+function is applied to that RSI and all computations are based on this transformed value. Note
+that DetrendedLength must be less than DetrenderLength. The IS INDEX or MINUS INDEX
+modifiers described on Page 26 may be applied to this variable.
+-56-
+THRESHOLDED RSI LookbackLength UpperThresh LowerThresh
+RSI at the specified length is computed and compared to the two specified thresholds. If the
+computed RSI is greater than or equal to the upper threshold, the value of this indicator is 1.0.
+If it is less than or equal to the lower threshold, the value is -1.0. Otherwise the value is 0.0.
+The IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this
+variable.
+-57-
+PURIFIED INDEX Norm HistLen Npred Nfam Nlooks Look1 ...
+A linear model is used to predict values of an index variable, and these predictions are subtracted
+from the true value of the index. This difference is the value of the PURIFIED INDEX
+indicator, normalized as discussed below. No compression is done. Typically, the index
+‘market’ will not be an actual market. Rather, it will be a sentiment indicator such as VIX. The
+predictors are based on recent market dynamics. In particular, linear trend, quadratic trend, and
+volatility of the market may be used as predictors in the linear model that predicts the sentiment
+index.
+The user can specify up to ten lookback distances for computing the market-based predictors.
+For each lookback, linear trend, quadratic trend, and volatility may be measured. Thus, we may
+have as many as 10*3=30 predictors available for the linear model. The user must specify
+whether the model will use one or two of these candidates. If the user specifies that one be
+used, the best predictor will be chosen. If two, all possible pairs of predictors will be examined
+and the best pair chosen. This process of choosing the best predictor(s) and training the linear
+model to predict the sentiment index is repeated for every bar. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may NOT be applied to this variable.
+The following parameters must be specified by the user:
+No rm alizatio n - Either or both of two normalization schemes can be used. One scheme is to
+multiply the predicted value by R-square before it is subtracted from the index. This has
+the effect of de-emphasizing the prediction when the model does a poor job of
+predicting the index. The price paid for this R-square normalization is less centering of
+the purified value. The other scheme is to divide the purified index by the standard error
+of the prediction. This stabilizes the variance of the purified index and has the effect of
+shrinking the value toward zero when the model does a poor job of prediction. The
+normalization parameter has the value 0, 1, 2, or 3:
+0 - No normalization; value = 100 * (actual - predicted) / actual
+1 - R-square normalization
+2 - Standard error normalization (This is the method in David Aronson’s paper)
+3 - Both normalizations
+His tLe n - The number of recent observations that will be used to train the predictive model.
+Np re d - The number of predictors that will be used by the model. This must be 1 or 2.
+-58-
+Nfam - The number of families of predictors for each lookback. This must be 1, 2, or 3.
+1 - Use linear trend only
+2 - Use linear and quadratic trend
+3 - Use linear and quadratic trend, and volatility
+Nlo o kb ac ks - The number of lookback distances to use for the trends and volatility. This must
+be at least one, and at most ten.
+Lo o kb ac k1 - The first lookback distance
+Lo o kb ac k2 - The second lookback distance, if used. A total of Nlookbacks of these appear.
+For example, the following definition would employ Type 2 normalization, and use the 50 most
+recent values of linear trend, quadratic trend, and volatility to train the model. These 50 do not
+include the current bar. The linear model that predicts the sentiment index would employ two
+predictors. Four different lookbacks will be used for the trend and volatility indicators: 10, 20,
+40, and 80 bars. Thus, the model will have 3*4=12 candidate predictors.
+PURE1: PURIFIED INDEX 2 50 2 3 4 10 20 40 80
+Because the optimal model is recomputed for every bar, it is not practical to print for the user
+the predictors chosen for the model. They can and do change frequently. However, TSSB does
+print a summary of how often each candidate is chosen, which can be interesting. It also prints
+the mean R-square. Here is a sample such output, showing the use of all three families for
+lookbacks of 10 and 50 bars:
+PURIFIED INDEX results for PURIF232 in OEX
+Mean R-square = 0.927
+10 Linear 28.7 %
+10 Quadratic 8.4 %
+10 Volatility 10.7 %
+50 Linear 25.2 %
+50 Quadratic 13.2 %
+50 Volatility 13.8 %
+-59-
+AROON UP Lookback
+This indicator measures the number of bars that have elapsed since the high within a specified
+lookback window occurred. The high price of each bar is examined for the current bar as well
+as each bar up to and including Length earlier bars. Note that Length+1 bars are examined, since
+the current bar is included in the window. If the high within the window occurred Length bars
+back, the first (oldest) bar in the window, the value of this indicator is zero. If the high occurred
+in the current bar, this indicator is 100. Values change linearly for intermediate distances. The
+IS INDEX or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+AROON DOWN Lookback
+This is identical to AROON UP except that the low within each window is found and this
+indicator measures the number of bars since that low occurred.
+AROON DIFF Lookback
+This is the difference AROON UP minus AROON DOWN.
+NEW HIGH Lookback
+This produces a binary (0/1) indicator. The value is 1 if the high of the current (most recent)
+bar is the highest high in the lookback period. Note that if this indicator is displayed on a colorcoded
+market, two phenomena may make it appear as if the indicator is slightly flawed. First,
+recall that these plots color each line segment according to the indicator value on the left end of
+the segment, so the plot will always appear to be offset by one bar. Second, this indicator is
+based on market highs, while a color-coded plot is based on closing price. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+NEW LOW Lookback
+This is identical to NEW HIGH except that it is based on low prices.
+NEW EXTREME Lookback
+This is NEW HIGH minus NEW LOW, so it is trinary (+1 / -1 / 0).
+-60-
+OFF HIGH Lookback ATRlookback
+The most recent Lookback market closes (including the current bar) are examined, and the
+highest close found. This minus the current close is the price difference off the high. If
+ATRlookback is positive (in which case it must be at least 2), the price difference is divided by
+the ATR over this lookback to produce this indicator. If the ATRlookback is zero, the price
+difference is divided by the high and multiplied by 100 to give a percent change. The IS INDEX
+or MINUS INDEX modifiers described on Page 26 may be applied to this variable.
+ABOVE LOW Lookback ATRlookback
+This is identical to OFF HIGH except that it is based on the price rise above the low of the
+lookback period.
+ABOVE MA BI Lookback
+ABOVE MA TRI Lookback
+ROC POSITIVE BI Lookback
+ROC POSITIVE TRI Lookback
+These are binary and trinary indicators of where the current close stands in relation to recent
+price history. The two ABOVE MA indicators compare the current close to a Lookback moving
+average of the close which ends at the bar prior to the current bar. In other words, the current
+close is not included in the lookback window. The two ROC POSITIVE indicators compare
+the current close to the close Lookback bars ago.
+The binary versions return a value of 1.0 if the current close is greater than the value to which
+it is compared, and 0.0 if it is less than or equal to this quantity. The trinary versions return 1.0
+if greater, -1.0 if less, and 0.0 if equal (which generally is very rare).
+-61-
+NEWHI Lookback
+SUPPORT Lookback
+NEWLO COUNT Lookback
+These three variables are closely related, so they are presented together. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may be applied to these variables.
+NEWHI N is a binary variable, normally zero, but one when the current bar closed at a price
+that exceeds the closing price of the N-1 prior most recent bars. In other words, N includes the
+current bar. Note that the NEW HIGH indicator is based on the high, while NEWHI is based
+on the close.
+SUPPORT N is the current support level based on NEWHI N. If NEWHI is one (we just set
+a new N-day high), SUPPORT is the bottom of the most recent V.
+Otherwise:
+If we are at or above the current SUPPORT, it remains unchanged.
+If we are below the current SUPPORT:
+If the next close (we are looking into the future!) is tied or lower, SUPPORT remains
+unchanged.
+But if the next close is greater than the current close, SUPPORT is reduced to the
+current close.
+Note that under this definition, the next, lower support level may occur immediately, as soon
+as we cross under the current support, or much later (if the market keeps dropping). Also note
+that neither SUPPORT nor NEWLO COUNT can be used as an indicator, as they look one bar
+into the future. If you wish to use either of these as an indicator, you must lag them by one bar.
+NEWLO COUNT N counts the number of times the market close crosses under the current
+SUPPORT. A crossing of a given SUPPORT is counted only once. Even though the market
+subsequently remains under the SUPPORT, the count is not incremented. It is incremented
+only when a new, lower support is defined and the market crosses under it.
+-62-
+NEWLO Lookback
+RESISTANCE Lookback
+NEWHI COUNT Lookback
+These three variables are closely related, so they are presented together. They are the inverse of
+the three variables described on the prior page. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to these variables.
+NEWLO N is a binary variable, normally zero, but one when the current bar closed at a price
+that is less than the closing price of the N-1 prior most recent bars. In other words, N includes
+the current bar. Note that the NEW LOW indicator is based on the low, while NEWLO is
+based on the close.
+RESISTANCE N is the current resistance level based on NEWLO N. If NEWLO is one (we
+just set a new N-day low), RESISTANCE is the top of the most recent inverted V.
+Otherwise:
+If we are at or below the current RESISTANCE, it remains unchanged.
+If we are above the current RESISTANCE:
+If the next close (we are looking into the future!) is tied or higher, RESISTANCE
+remains unchanged.
+But if the next close is less than the current close, RESISTANCE is increased to the
+current close.
+Note that under this definition, the next, higher resistance level may occur immediately, as soon
+as we cross above the current resistance, or much later (if the market keeps rising). Also note
+that neither RESISTANCE nor NEWHI COUNT can be used as an indicator, as they look one
+bar into the future. If you wish to use either of these as an indicator, you must lag them by one
+bar.
+NEWHI COUNT N counts the number of times the market close crosses above the current
+RESISTANCE. A crossing of a given RESISTANCE is counted only once. Even though the
+market subsequently remains above the RESISTANCE, the count is not incremented. It is
+incremented only when a new, higher resistance is defined and the market crosses above it.
+-63-
+CUBIC FIT VALUE Lookback
+This is not an indicator or target. A third-order Legendre polynomial is fit to the closing prices
+over the specified lookback. The computed variable is the value of this polynomial at the
+current time. This results in a variable that is commensurate with the market and which gives
+the appearance (though not the reality) of being lowpass smoothed with a lag of nearly zero
+whenever the prices in the lookback window reasonably follow the shape of the polynomial.
+A third-order Legendre polynomial can accommodate at most two turning points (peaks plus
+troughs). If the prices in the window have more than two prominent turning points, the fit will
+be poor. This generally results in the appearance of significant lag.
+CUBIC FIT ERROR Lookback
+This is not an indicator or target. A third-order Legendre polynomial is fit to the closing prices
+over the specified lookback. The computed variable is the RMS error (polynomial value versus
+actual closing price) of this polynomial across the lookback window. A third-order Legendre
+polynomial can accommodate at most two turning points (peaks plus troughs). If the prices in
+the window have more than two prominent turning points, the fit will be poor. This generally
+results in inflation of the error.
+-64-
+DOWN PERSIST
+UP PERSIST
+These two variables look for persistent trend in market price. To compute DOWN PERSIST
+at a bar, we look back at the prior bar. If that prior high is lower than the current high, we are
+done and the value of the indicator is zero. But if the prior high is greater than or equal to the
+current high, we increment the counter and then move this two-bar window back one bar and
+repeat. For UP PERSIST we look at the low instead of the high, and reverse the direction of
+the price change. Note that a series of ties will produce a persistence count regardless of the
+direction in which the tie is ultimately broken. This should be very rare.
+-65-
+(5)
+(6)
+NEXT DAY LOG RATIO
+This predicted variable measures the one-day change of the market in the immediate future,
+roughly expressed as an annualized percent. The implied trading scenario is that after today’s
+close we make an entry decision for the next day. We enter at the next day’s open, and close the
+position at the following day’s open. The IS INDEX or MINUS INDEX modifiers described
+on Page 26 may be applied to this variable. Let Oi be the open i days in the future, where i=0
+is today (whose open has passed, since we are at the end of the day when variables for the day
+are computed). This variable is defined as follows:
+CLOSE LOG RATIO
+This predicted variable measures the one-day change of the market in the immediate future,
+roughly expressed as an annualized percent. The implied trading scenario is that after today’s
+close we open a position at the closing price. (This, of course is impossible, because by
+definition the market is closed! Thus, this choice of target variable is technically cheating. But
+in practice it may be possible to come very close to this action.) We close the position at the
+next day’s close. The IS INDEX or MINUS INDEX modifiers described on Page 26 may be
+applied to this variable. Let Ci be the close i days in the future, where i=0 is today (whose close
+has passed, since we are at the end of the day when variables for the day are computed). This
+variable is defined as follows:
+-66-
+(7)
+(8)
+NEXT DAY ATR RETURN Distance
+This predicted variable measures the one-day change of the market in the immediate future,
+relative to recent Average True Range (ATR) taken over a specified distance. The implied trading
+scenario is that after today’s close we make an entry decision for the next day. We enter at the
+next day’s open, and close the position at the following day’s open. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable. Let Oi be the open i
+days in the future, where i=0 is today (whose open has passed, since we are at the end of the day
+when variables for the day are computed). This variable is defined as follows:
+If Distance is specified as zero, the denominator is one so that the value is the actual point return,
+not normalized in any way.
+CLOSE ATR RETURN Distance
+This predicted variable measures the one-day change of the market in the immediate future,
+relative to recent Average True Range (ATR) taken over a specified distance. The implied trading
+scenario is that after today’s close we open a position at the closing price. (This, of course is
+impossible, because by definition the market is closed! Thus, this choice of target variable is
+technically cheating. But in practice it may be possible to come very close to this action.) We
+close the position at the next day’s close. The IS INDEX or MINUS INDEX modifiers
+described on Page 26 may be applied to this variable. Let Ci be the close i days in the future,
+where i=0 is today (whose close has passed, since we are at the end of the day when variables
+for the day are computed). This variable is defined as follows:
+If Distance is specified as zero, the denominator is one so that the value is the actual point return,
+not normalized in any way.
+-67-
+(9)
+OC ATR RETURN Distance
+This predicted variable measures the one-day change of the market in the immediate future,
+relative to recent Average True Range (ATR) taken over a specified distance. The implied trading
+scenario is that we open a position at tomorrow’s opening price. We close the position at that
+day’s close. (This, of course is impossible, because by definition the market is closed! Thus, this
+choice of target variable is technically cheating. But in practice it may be possible to come very
+close to this action.) The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable. Let Oi be the open i days in the future, and let Ci be the close i days
+in the future, where i=0 is today (whose close has passed, since we are at the end of the day
+when variables for the day are computed). This variable is defined as follows:
+If Distance is specified as zero, the denominator is one so that the value is the actual point return,
+not normalized in any way.
+SUBSEQUENT DAY ATR RETURN Lead Distance
+This is identical to NEXT DAY ATR RETURN except that instead of looking one day ahead,
+it looks Lead days ahead.
+NEXT MONTH ATR RETURN Distance
+This is identical to NEXT DAY ATR RETURN except that the return is computed starting
+from the first day of the first month following the current day, and ending the first day of the
+next month after that. If Distance is set to zero, the return is the actual point return, not
+normalized in any way.
+INTRADAY RETURN Distance
+This is the log of the ratio of the opening price Distance+1 bars in the future, to the opening
+price 1 bar in the future. If the date changes between the current bar and that Distance+1 bars
+in the future, this is treated as a missing value.
+-68-
+HIT OR MISS Up Down Cutoff ATRdist
+The ATR is computed for a history of ATRdist bars, and then the future price move is examined
+up to Cutoff bars ahead, beginning at tomorrow’s open. If the price goes up at least Up times
+ATR before going down at least Down times ATR, or if the price goes down at least Down times
+ATR before going up at least Up times ATR, the value of the variable is the open of the bar
+where this happens, minus the open of the current bar, divided by ATR. Piercing either limit
+is equivalent to SUBSEQUENT DAY ATR RETURN. If the price hits neither of these
+thresholds by the time Cutoff bars have passed, the value of the variable is the price change
+divided by ATR. If ATRdist is set to zero, no normalization is done. The price movement is
+defined as the actual point return. The IS INDEX or MINUS INDEX modifiers described on
+Page 26 may be applied to this variable.
+FUTURE SLOPE Ahead ATRdist
+This is the slope (price change per bar) of the least-squares line Ahead bars, divided by ATR
+looking back ATRdist bars. The IS INDEX or MINUS INDEX modifiers described on Page
+26 may be applied to this variable.
+RSQ FUTURE SLOPE Ahead ATRdist
+This is the slope (price change per bar) of the least-squares line Ahead bars, divided by ATR
+looking back ATRdist bars, multiplied by the R-square of the fit. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable.
+CURVATURE INDEX LookAhead MinSep SepInc Nseps Vdist
+This target measures the change in slope over a time period that is partially or entirely in the
+future. A positive value means that the slope is increasing, and a negative value means that the
+slope is decreasing. The IS INDEX or MINUS INDEX modifiers described on Page 26 may
+be applied to this variable.
+The most basic source of curvature measure, the fundamental building block of this target
+variable, is a set of three points which may be called P-1, P0, and P1. P-1 precedes P0 by a certain
+number of bars, and P1 follows P0 by this same number of bars, called the separation in this
+discussion. Thus, P0 is the ‘center’ of these three equally spaced points. The slope (except for
+a constant factor related to the point separation) prior to the center point is P0 - P-1, and the
+slope after the center point is P1 - P0. Subtracting the former from the latter gives the curvature,
+P-1 + P1 - 2 * P0.
+-69-
+This simplistic formula for curvature has a serious problem when used as a target in market
+prediction: It is not immune to changes in scale. If two price series are identical except that one
+is twice the other, then this double-value series will, at every point, have twice the curvature of
+the other series. This is obviously undesirable behavior. If we were to plot two series and find
+that they were identical except for the axis labels, we would be annoyed to find that their
+curvatures were different (at least in market-trading applications).
+Such differences in scaling can arise in any of several ways:
+! Different markets generally have different price scaling.
+! A given market may experience periods of unusually high or low volatility.
+! If the three price points are adjacent bars, the price differences will be much smaller than
+if the outer points are separated from the center by 20 bars. So the separation impacts
+the simple definition of curvature.
+All of these sources of scaling variation can be addressed by a single expedient: look backward
+from the current bar over a relatively long window, and compute the volatility within this recent
+historical window. This allows TSSB to normalize the curvature measure according to the
+degree of price movement that would be expected in this market, during this time period, with
+this point separation. The distance to look back for volatility normalization is given by the final
+parameter, shown as Vd is t in the syntax above.
+Sometimes the user does not wish to be locked into a single separation distance. Pooling
+curvatures from a range of separations can provide a more global estimate of curvature. In other
+words, if prices have strong upward (or downward) curvature at separations of 2, 6, and 10 bars,
+we can be confident that this is a real turning point in the market. This pooling of multiple
+separations is effected by three parameters.
+Min Se p is the minimum separation between each of the two outer points and the center point.
+Se p In c is the increment in separations across the pooled set of separations.
+Ns e p s is the number of different separations to pool. Set this to 1 for a single separation.
+For example, MinSep=2, SepInc=4, and Nseps=3 would provide the separations of 2, 6, and 10
+bars mentioned earlier.
+Finally, the user needs to decide where the center P0 is located relative to the current bar. All
+separations use the same center. The Lo o kAh e ad parameter is the number of bars past the
+current bar at which the center is located.
+-70-
+A strong argument can be made that the best value for LookAhead is zero, as this centers the
+curvature measure(s) at the current bar. In other words, the value of this target would reveal
+whether the slope of the price is about to change relative to what the slope has been recently.
+This would be a valuable piece of information for the model to know. If a model can predict
+that the price slope is about to increase or decrease dramatically starting at the next bar, it is
+likely that this prediction can be used profitably.
+However, it must be emphasized that if the backward-looking point, P-1, is at or prior to the
+current bar, there will be overlap between the market segment used to compute indicators and
+that used to compute the target. This means that performance results related to this target will
+be optimistic, even out-of-sample. Also, CURVATURE INDEX is not a profit-based target,
+so profit factors and the like would not be computed for it. For these reasons, it is virtually
+mandatory that the user employ the PROFIT option to declare a secondary profit-based target
+that will be used to compute legitimate profitability performance measures.
+If for some reason the user wants to push the center of curvature into the future far enough that
+the indicator and target price histories do not overlap, this can be accomplished with the
+following reasoning: The maximum separation between the center point (P0) and P-1 will be
+MinSep + (Nseps-1) * SepInc. Thus, LookAhead must be at least one greater than this quantity if
+the P-1 at maximum separation is to lie at least one bar past the current bar. However, be
+advised that the further the center is pushed ahead of the current point, the further the target’s
+price data will be from the indicators’ price data. This will almost certainly deprive the model
+of valuable predictive information. It is difficult to imagine a scenario in which having a
+LookAhead greater than zero would be advisable.
+The CURVATURE INDEX target was inspired by the paper “Measuring the Statistical
+Significance of Financial Trend Change Forecasts” by S. Kris Kaufman.
+-71-
+BULL MinPercentReturn MaxPercentDrawdown MinBars
+This target variable examines the entire market history as a whole and identifies bull markets by
+looking into the past and future as far as is needed to confirm the nature of each market
+segment. A bull market is defined as a market segment which satisfies three specified criteria:
+1) Its total percent return from the low point at which it starts to the high point at which it ends
+must be at least the specified minimum percent.
+2) At no time in the segment must the percent drawdown exceed the specified maximum.
+3) Its time duration must be at least the specified number of bars
+All calculations are based on the market close. If there are contiguous ties for the close at the
+start of the bull market, the start will be flagged as the last tied bar. If there are contiguous ties
+for the close at the end of the bull market, the end will be flagged as the first tied bar. In other
+words, the flat market bars before or after the flagged segment will not be considered part of the
+bull market, even though they may satisfy the user’s criteria. A bull market always begins and
+ends with price motion. The IS INDEX or MINUS INDEX modifiers described on Page 26
+may NOT be applied to this variable.
+Bull markets are identified by a target value of 1.0, versus 0.0 for non-bull markets. For
+example, the following target variable would locate contiguous market segments with a total gain
+of at least 15 percent, no interior drawdown in excess of 5 percent, and cover at least 50 bars.
+Bear markets can be similarly defined by substituting the keyword BEAR for BULL:
+MY_BULL: BULL 15 5 50
+It is possible (though highly unusual) for a period to be simultaneously identified as both a bull
+and a bear market. For example, if a bull market is defined with a loose limit for drawdown,
+then drawdown periods within a bull market may be classified as mini-bear markets.
+If the color-coded market display is used to visualize bull/bear classifications, be aware of a
+small source of potential confusion. Because the typical use of this display is to see the effect
+of current indicator values on future market movement, each market segment is colored according
+to the variable value at the left end of the segment. Thus, when we reach the extreme at which
+a bull or bear market ends, the following segment (with this extreme as its left end) will be colored
+according to the bull/bear classification of the extreme, leading to the mistaken impression that
+the classification extends one bar too far. This becomes even more confusing when bull and
+bear targets are displayed simultaneously, because at any extreme at which a bull market changes
+to a bear, or vice versa, the next segment will be colored for both classes! But the resolution is
+easy: just remember that the color of each segment identifies the value of the coloring variable
+as of the left end of the segment.
+-72-
+This target obviously does not measure profit, so PROFIT= would normally be required for
+models. Alternatively, do not use a profit criterion, or use the IS PROFIT option.
+PRE BULL MinPctReturn MaxPctDrawdown MinBars Lookahead
+This begins by computing the BULL target above. Then the target flags are modified by the
+following rule:
+1) If the current flag is True (1.0), it is set to False (0.0). Otherwise...
+2) The current flag is set to True if and only if one or more of the flags is True in the next
+Lookahead bars.
+Thus, the PRE BULL target anticipates an upcoming bull market before it begins.
+PRE BEAR is similarly defined.
+ENDING BULL MinPctRet MaxPctDD PctThresh MinBars
+This target variable is closely related to the BULL target presented on the prior page, except that
+instead of identifying a complete bull market, it identifies the ending period of a bull market, as
+well as the short time period after completion of a bull market. The IS INDEX or MINUS
+INDEX modifiers described on Page 26 may be applied to this variable.
+The MinPctRet, MaxPctDD, and MinBars parameters are used to identify bull markets. A price
+threshold is computed as the specified PctThresh below the peak of the bull market. The first
+(earliest) time at which the market close touches or exceeds this price threshold is defined as the
+ending of the bull market. This target variable is set to 1.0 from this point through the peak of
+the bull market. In addition, this target continues to be set to 1.0 past the peak as long as the
+price remains at or above the price threshold. At all other times the variable is set to 0.0.
+For example, suppose the user sets PctThresh to 5, and suppose the bull market ends at a price
+of 1000. The price threshold will be 1000 - 0.05 * 1000 = 950. The market extent running from
+the first time the price hits 950 through the end of the bull market at a price of 1000 will be
+flagged as 1.0. Furthermore, after the peak is hit, as long as the price remains at or above 950
+the target will continue to be flagged.
+The corresponding target for bear markets can be computed by specifying ENDING BEAR
+instead of ENDING BULL.
+Please review the discussion about displaying this target with the color-coded market price
+display, given at the end of the BULL target section on the prior page. The fact that colors are
+chosen based on the variable at the left end of each line segment can lead to confusion.
+-73-
+STARTING BULL MinPctRet MaxPctDD PctThresh MinBars
+This target variable is closely related to the BULL target presented two pages earlier, except that
+instead of identifying a complete bull market, it identifies the period just prior to the start of a
+bull market, as well as the short time period after the bull market begins. The IS INDEX or
+MINUS INDEX modifiers described on Page 26 may NOT be applied to this variable.
+The MinPctRet, MaxPctDD, and MinBars parameters are used to identify bull markets. A price
+threshold is computed as the specified PctThresh above the low, starting point of the bull market.
+Working backwards in time from the start of the bull market, it locates the first (chronologically
+latest) bar at which the market close exceeds this price threshold. The next bar forward in time
+is defined as the ‘starting’ of the bull market for the purposes of this target, even though the
+actual bull market probably has not actually begun yet. This target variable is set to 1.0 from this
+point through the true start of the bull market. In addition, this target continues to be set to 1.0
+past the start as long as the price remains at or below the price threshold. At all other times the
+variable is set to 0.0.
+For example, suppose the user sets PctThresh to 5, and suppose the bull market starts at a price
+of 1000. The price threshold will be 1000 + 0.05 * 1000 = 1050. Then bars on both sides of
+the start of the bull market will be flagged as long as their price remains at or below 1050. In
+both directions, once this price threshold is breached all flagging will halt.
+The corresponding target for bear markets can be computed by specifying STARTING BEAR
+instead of STARTING BULL.
+Please review the discussion about displaying this target with the color-coded market price
+display, given at the end of the BULL target section two pages earlier. The fact that colors are
+chosen based on the variable at the left end of each line segment can lead to confusion.
+-74-
+Examples of Variables
+This section presents some examples of predictor and predicted variables.
+CMMA: CLOSE MINUS MOVING AVERAGE 10
+A variable that the user calls CMMA is computed using Equation 2, 3, 4 with a historical
+moving-average length of 10 days.
+CMMA_N: CLOSE MINUS MOVING AVERAGE 10 : NORMALIZE 250
+The same variable as above is computed. It is then normalized (center and scale) going back 250
+days (approximately a year).
+CMMA_C: CLOSE MINUS MOVING AVERAGE 10 ! 0.5
+The variable shown first in this section is computed. It is then subjected to cross-market
+normalization, provided that at least half of the specified markets have valid data for the day.
+CMMA_N_C: CLOSE MINUS MOVING AVERAGE 10: NORMALIZE 250 ! 0.5
+The variable shown first in this section is computed. It is then normalized (center and scale),
+and finally subjected to cross-market normalization as above.
+LOGRET: NEXT DAY LOG RATIO
+This predicted variable is computed using Equation 5, 6.

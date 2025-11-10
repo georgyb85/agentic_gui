@@ -1,0 +1,446 @@
+Part 1: The "Big Picture" - Your Current Architecture and How to Improve It
+You're right to feel that things are a "mess." The core issue is that data responsibility is fragmented, leading to redundant work and unnecessary data transformations.
+Current (Problematic) Data Flow:
+File Read: DataFrameIO::read_tssb -> AnalyticsDataFrame is created. (This is good).
+UI Display:
+TimeSeriesWindow::DrawDataTable iterates through the AnalyticsDataFrame and converts each cell to a string on every frame for the first MAX_DISPLAY_ROWS. The display cache helps, but the logic is complex.
+Plotting:
+User clicks a column header.
+TimeSeriesWindow::UpdatePlotData is called.
+It calls m_dataFrame->with_unix_timestamp(...).
+This function creates a new AnalyticsDataFrame with an added timestamp column.
+The plot data is cached from this new, temporary DataFrame.
+This happens every time you select a new column to plot, modifying the DataFrame and being highly inefficient.
+Legacy Analysis:
+You would get a ColumnView from the AnalyticsDataFrame.
+This ColumnView might fail or give incorrect results if the underlying Arrow column is split into multiple chunks (a common occurrence).
+Proposed (Streamlined) Data Flow:
+The goal is to establish AnalyticsDataFrame as the single source of truth and perform transformations once, when necessary.
+File Read & Preparation (Once per Load):
+DataFrameIO::read_tssb -> AnalyticsDataFrame is created.
+Immediately after loading, detect the time format and generate the Unix timestamp column. Store this new, augmented DataFrame back into m_dataFrame.
+The AnalyticsDataFrame now permanently contains all the data needed for any subsequent operation.
+Generate the m_displayCache for the table view once from this final DataFrame.
+UI Display (Efficient):
+DrawDataTable reads directly and exclusively from the pre-computed m_displayCache. No conversions, no logic, just rendering.
+DrawPlotArea gets pointers to the existing Unix timestamp column and the selected value column from the single, master m_dataFrame. No new DataFrames are created.
+Legacy Analysis (Robust):
+The ColumnView class is fixed to correctly handle multi-chunk arrays, providing a reliable, zero-copy view into the data for your algorithms.
+This new flow eliminates redundant computations, simplifies state management, and makes the entire system faster and more robust.
+Part 2: What's Working Well
+Before we dive into changes, let's acknowledge the excellent parts of your design:
+AnalyticsDataFrame Wrapper: This is the correct central abstraction.
+Asynchronous Loading: Using std::async in TimeSeriesWindow is crucial for a responsive UI.
+Arrow for I/O: Using arrow::csv::TableReader and WriteCSV is the most performant way to handle this.
+WhitespaceNormalizingInputStream: This is a clever and robust solution for handling space-delimited files, which are notoriously difficult for standard parsers.
+Part 3: Key Areas for Refactoring and Improvement
+Here are the concrete areas to address, from most to least critical.
+1. Efficient Timestamp Generation (The Biggest Win)
+Concern: Redundant timestamp calculations are happening. The with_unix_timestamp call is expensive and modifies the DataFrame state in a temporary way.
+Solution: Generate timestamps once after the file is loaded. The plot will then use this pre-computed column.
+In TimeSeriesWindow.cpp, your loading logic will change to:
+code
+C++
+// Inside the 'if (m_isLoading && m_loadingFuture.valid() ...)' block
+auto result = m_loadingFuture.get();
+if (result.ok()) {
+    auto df = std::make_unique<chronosflow::AnalyticsDataFrame>(std::move(result).ValueOrDie());
+
+    // ... [Your existing logic to find date/time columns and detect time format] ...
+    
+    df->set_tssb_metadata(*date_it, time_col_name);
+    m_detectedTimeFormat = ...; // Your detection logic
+
+    // --- REFACTOR: Generate timestamps ONCE and store them ---
+    if (df->has_tssb_metadata()) {
+        auto ts_result = df->with_unix_timestamp("timestamp_unix", m_detectedTimeFormat);
+        if (ts_result.ok()) {
+            // Replace the original DataFrame with the new one containing the timestamp column
+            *df = std::move(ts_result).ValueOrDie();
+        } else {
+            m_hasError = true;
+            m_errorMessage = "Failed to create Unix timestamps: " + ts_result.status().ToString();
+            m_isLoading = false;
+            return; 
+        }
+    }
+    
+    m_dataFrame = std::move(df);
+    m_columnHeaders = m_dataFrame->column_names();
+    UpdateDisplayCache(); // Now update the cache from the final DataFrame
+}
+// ...
+Then, UpdatePlotData becomes much simpler: it no longer calls with_unix_timestamp. It just gets the data.
+2. Robust Data Access (ColumnView)
+Concern: Legacy algorithms need raw pointers, but the current get_column_view is not robust.
+Problem: The code uses column->chunk(0), which will fail or access incomplete data if the table has more than one chunk.
+Solution: Check the number of chunks. If more than one, use arrow::Concatenate to create a single, contiguous array. The ColumnView's lifetime will be tied to this new temporary array.
+See the corrected column_view.h in the files below. This is a critical bug fix.
+3. Optimizing the UI Layer (TimeSeriesWindow)
+Concern: The UI is doing too much work, and the table rendering and plotting logic are tangled with data transformation.
+Solution:
+Fully Rely on m_displayCache: Your UpdateDisplayCache function is good. Ensure it's called only when data is loaded (LoadCSVFile) or cleared (ClearData). The DrawDataTable function should then only read from this cache. This makes table rendering extremely fast.
+Simplify UpdatePlotData: As mentioned in point 1, this function should no longer create new DataFrames. It simply gets views/data from the master m_dataFrame that already has the timestamp_unix column.
+4. Deprecating TimeSeries.h
+Concern: The presence of TimeSeries.h is confusing.
+Solution: The TimeSeries class represents an older, manual way of doing what AnalyticsDataFrame now does with Arrow. Your UI is already moving away from it (GetTimeSeries() returns nullptr). You should plan to remove TimeSeries.h and all related code entirely. All its functionality (SoA layout, data access, etc.) is provided more robustly and performantly by Apache Arrow.
+Part 4: Code-Level Fixes and Implementation
+Here are the key files with the proposed fixes and refactoring applied. I've added // DIAGNOSTIC: or // REFACTOR: comments to highlight the changes.
+analytics_dataframe.cpp (Critical Fix)
+The key fix here is in with_unix_timestamp to handle multi-chunk tables correctly and use the platform-independent timegm.
+code
+C++
+#include "analytics_dataframe.h"
+#include <arrow/compute/api.h>
+#include <arrow/compute/expression.h>
+#include <arrow/array.h>
+#include <arrow/builder.h>
+#include <arrow/datum.h>
+#include <arrow/compute/cast.h>
+#include <algorithm>
+#include <ctime>
+
+#ifdef WITH_CUDA
+#include <cudf/interop.hpp>
+#endif
+
+// DIAGNOSTIC: Platform-independent fix for timegm.
+// MSVC uses _mkgmtime, whereas POSIX systems use timegm.
+#ifdef _WIN32
+#define timegm _mkgmtime
+#endif
+
+
+namespace chronosflow {
+
+    // ... (Constructors, to_gpu, to_cpu, etc. are fine) ...
+    // ... (slice_by_row_index, select_rows_by_timestamp, select_columns are fine) ...
+
+    arrow::Result<AnalyticsDataFrame> AnalyticsDataFrame::with_iso_timestamp(
+        const std::string& output_column_name,
+        TimeFormat time_format) const {
+        // This function can be simplified now, though it's less critical
+        // since the UI will use the Unix timestamp directly.
+        ARROW_ASSIGN_OR_RAISE(auto cpu_df, to_cpu());
+
+        ARROW_ASSIGN_OR_RAISE(auto df_with_unix, cpu_df.ValueOrDie().with_unix_timestamp("timestamp_unix_internal", time_format));
+
+        auto unix_column = df_with_unix.get_cpu_table()->GetColumnByName("timestamp_unix_internal");
+        if (!unix_column) {
+            return arrow::Status::Invalid("Internal Unix timestamp creation failed.");
+        }
+
+        // Cast int64 (Unix seconds) to an Arrow timestamp[s]
+        arrow::compute::CastOptions cast_opts_ts;
+        cast_opts_ts.to_type = arrow::timestamp(arrow::TimeUnit::SECOND);
+        ARROW_ASSIGN_OR_RAISE(auto arrow_ts_datum, arrow::compute::Cast(unix_column, cast_opts_ts));
+        
+        // Use Arrow's built-in `strftime` compute function for robust conversion
+        arrow::compute::StrftimeOptions strftime_options("%Y-%m-%dT%H:%M:%S");
+        ARROW_ASSIGN_OR_RAISE(auto iso_datum, arrow::compute::CallFunction("strftime", {arrow_ts_datum}, &strftime_options));
+        
+        auto iso_column = iso_datum.chunked_array();
+        auto iso_field = arrow::field(output_column_name, arrow::utf8());
+
+        // Add the new column to the original table
+        ARROW_ASSIGN_OR_RAISE(auto new_table, cpu_table_->AddColumn(cpu_table_->num_columns(), iso_field, iso_column));
+        return create_from_cpu_table(new_table);
+    }
+
+    arrow::Result<AnalyticsDataFrame> AnalyticsDataFrame::with_unix_timestamp(
+        const std::string& output_column_name,
+        TimeFormat time_format) const {
+
+        if (!has_tssb_metadata()) {
+            return arrow::Status::Invalid("TSSB metadata not set");
+        }
+        
+        // REFACTOR: Ensure we're working on the CPU table
+        ARROW_ASSIGN_OR_RAISE(auto cpu_df_res, to_cpu());
+        const auto& cpu_df = cpu_df_res.ValueOrDie();
+        auto table = cpu_df.get_cpu_table();
+
+        if (!table) {
+            return arrow::Status::Invalid("No data available");
+        }
+
+        auto date_column = table->GetColumnByName(*tssb_date_column_);
+        if (!date_column) {
+            return arrow::Status::Invalid("Date column not found: ", *tssb_date_column_);
+        }
+
+        std::shared_ptr<arrow::ChunkedArray> time_column;
+        bool has_time = (time_format != TimeFormat::NONE && tssb_time_column_ && !tssb_time_column_->empty());
+        if (has_time) {
+            time_column = table->GetColumnByName(*tssb_time_column_);
+            if (!time_column) {
+                return arrow::Status::Invalid("Time column not found: ", *tssb_time_column_);
+            }
+        }
+
+        // DIAGNOSTIC: Safely cast input columns to int64 to guarantee the type for the loop.
+        arrow::compute::CastOptions cast_opts;
+        cast_opts.to_type = arrow::int64();
+
+        ARROW_ASSIGN_OR_RAISE(auto date_i64_datum, arrow::compute::Cast(date_column, cast_opts));
+        auto date_i64_col = date_i64_datum.chunked_array();
+
+        std::shared_ptr<arrow::ChunkedArray> time_i64_col;
+        if (has_time) {
+            ARROW_ASSIGN_OR_RAISE(auto time_i64_datum, arrow::compute::Cast(time_column, cast_opts));
+            time_i64_col = time_i64_datum.chunked_array();
+        }
+
+        arrow::Int64Builder builder;
+        ARROW_RETURN_NOT_OK(builder.Reserve(table->num_rows()));
+
+        // DIAGNOSTIC: This loop robustly handles tables with multiple chunks.
+        for (int c = 0; c < date_i64_col->num_chunks(); ++c) {
+            auto date_chunk = std::static_pointer_cast<arrow::Int64Array>(date_i64_col->chunk(c));
+            
+            std::shared_ptr<arrow::Int64Array> time_chunk;
+            if (has_time) {
+                // Ensure we have a corresponding time chunk
+                if (c < time_i64_col->num_chunks()) {
+                    time_chunk = std::static_pointer_cast<arrow::Int64Array>(time_i64_col->chunk(c));
+                } else {
+                    // This case is unlikely but guards against mismatched chunking
+                    return arrow::Status::Invalid("Date and Time columns have different chunking layouts.");
+                }
+            }
+
+            for (int64_t i = 0; i < date_chunk->length(); ++i) {
+                if(date_chunk->IsNull(i) || (has_time && time_chunk && time_chunk->IsNull(i))) {
+                    ARROW_RETURN_NOT_OK(builder.AppendNull());
+                    continue;
+                }
+
+                int64_t date_val = date_chunk->Value(i);
+
+                std::tm tm = {};
+                tm.tm_year = static_cast<int>(date_val / 10000) - 1900;
+                tm.tm_mon = static_cast<int>((date_val % 10000) / 100) - 1;
+                tm.tm_mday = static_cast<int>(date_val % 100);
+
+                if (has_time && time_chunk) {
+                    int64_t time_val = time_chunk->Value(i);
+                    if (time_format == TimeFormat::HHMM) {
+                        tm.tm_hour = static_cast<int>(time_val / 100);
+                        tm.tm_min = static_cast<int>(time_val % 100);
+                        tm.tm_sec = 0;
+                    } else { // HHMMSS
+                        tm.tm_hour = static_cast<int>(time_val / 10000);
+                        tm.tm_min = static_cast<int>((time_val % 10000) / 100);
+                        tm.tm_sec = static_cast<int>(time_val % 100);
+                    }
+                }
+
+                time_t unix_seconds = timegm(&tm);
+                if (unix_seconds == -1) {
+                    ARROW_RETURN_NOT_OK(builder.AppendNull());
+                } else {
+                    ARROW_RETURN_NOT_OK(builder.Append(static_cast<int64_t>(unix_seconds)));
+                }
+            }
+        }
+
+        std::shared_ptr<arrow::Array> unix_ts_array;
+        ARROW_RETURN_NOT_OK(builder.Finish(&unix_ts_array));
+
+        auto unix_ts_column = std::make_shared<arrow::ChunkedArray>(unix_ts_array);
+        auto unix_field = arrow::field(output_column_name, arrow::int64());
+
+        ARROW_ASSIGN_OR_RAISE(auto new_table, table->AddColumn(table->num_columns(), unix_field, unix_ts_column));
+
+        return create_from_cpu_table(new_table);
+    }
+    
+    // ... (rest of the file is mostly ok) ...
+
+} // namespace chronosflow
+column_view.h (Critical Bug Fix)
+This fixes the multi-chunk issue, making get_column_view reliable.
+code
+C++
+// ... includes ...
+
+// DIAGNOSTIC: Add missing headers
+#include <arrow/array.h>
+#include <arrow/array/array_primitive.h>
+#include <arrow/array/concatenate.h>
+#include <arrow/type_traits.h>
+
+
+// ... class definition ...
+
+template<typename T>
+arrow::Result<ColumnView<T>> ColumnView<T>::from_arrow_column(
+    std::shared_ptr<arrow::Table> table,
+    const std::string& column_name) {
+    
+    if (!table) {
+        return arrow::Status::Invalid("Input table is null");
+    }
+
+    auto column = table->GetColumnByName(column_name);
+    if (!column) {
+        return arrow::Status::Invalid("Column not found: ", column_name);
+    }
+    
+    std::shared_ptr<arrow::Array> array;
+    std::shared_ptr<void> lifetime_sentinel;
+
+    // DIAGNOSTIC: Handle multi-chunk columns by combining them into a single contiguous array.
+    if (column->num_chunks() == 0) {
+        return ColumnView<T>(nullptr, 0, DeviceType::CPU, table);
+    } else if (column->num_chunks() == 1) {
+        array = column->chunk(0);
+        lifetime_sentinel = table; // Lifetime is tied to the original table
+    } else {
+        ARROW_ASSIGN_OR_RAISE(auto combined_array, column->CombineChunks());
+        array = combined_array;
+        // The lifetime sentinel must now hold the new combined array.
+        lifetime_sentinel = array; 
+    }
+    
+    // DIAGNOSTIC: Use type traits for safer casting.
+    using ArrayType = typename arrow::TypeTraits<typename arrow::CppTypeToArrowType<T>::Type>::ArrayType;
+    auto typed_array = std::dynamic_pointer_cast<ArrayType>(array);
+
+    if (!typed_array) {
+        return arrow::Status::Invalid("Type mismatch: Cannot cast column '", column_name, 
+                                      "' to the requested type.");
+    }
+
+    const T* data_ptr = typed_array->raw_values();
+    std::size_t size = typed_array->length();
+
+    return ColumnView<T>(data_ptr, size, DeviceType::CPU, lifetime_sentinel);
+}
+
+// ... (rest of the file)
+TimeSeriesWindow.cpp (Refactoring for Efficiency)
+This implements the streamlined data flow.
+code
+C++
+// ... (includes are fine) ...
+
+// ... (constructor is fine) ...
+
+void TimeSeriesWindow::Draw() {
+    if (!m_isVisible) {
+        return;
+    }
+    
+    // Check if a loading operation has completed
+    if (m_isLoading && m_loadingFuture.valid() &&
+        m_loadingFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        
+        m_isLoading = false; // Set this early
+        auto result = m_loadingFuture.get();
+
+        if (result.ok()) {
+            auto df = std::make_unique<chronosflow::AnalyticsDataFrame>(std::move(result).ValueOrDie());
+
+            // --- REFACTOR: Centralized data preparation ---
+            const auto& columns = df->column_names();
+            auto find_case_insensitive = /* ... same as before ... */;
+
+            auto date_it = find_case_insensitive(columns, "Date");
+            auto time_it = find_case_insensitive(columns, "Time");
+
+            if (date_it == columns.end()) {
+                m_hasError = true;
+                m_errorMessage = "Required 'Date' column not found in file.";
+                return;
+            }
+
+            std::string time_col_name = (time_it != columns.end()) ? *time_it : "";
+            df->set_tssb_metadata(*date_it, time_col_name);
+            
+            // Detect time format
+            m_detectedTimeFormat = chronosflow::TimeFormat::NONE;
+            if (!time_col_name.empty()) {
+                // ... your time format detection logic ...
+            }
+
+            // Generate Unix timestamp column ONCE and replace the DataFrame
+            if (df->has_tssb_metadata()) {
+                auto ts_result = df->with_unix_timestamp("timestamp_unix", m_detectedTimeFormat);
+                if (ts_result.ok()) {
+                    *df = std::move(ts_result).ValueOrDie();
+                } else {
+                    m_hasError = true;
+                    m_errorMessage = "Failed to create Unix timestamps: " + ts_result.status().ToString();
+                    return;
+                }
+            }
+            // --- END REFACTOR ---
+            
+            m_dataFrame = std::move(df);
+            m_columnHeaders = m_dataFrame->column_names();
+            UpdateDisplayCache(); // Update cache from the final, augmented DataFrame
+            
+            std::cout << "[TimeSeriesWindow] Loaded and prepared " << m_dataFrame->num_rows() << " rows." << std::endl;
+        } else {
+            m_hasError = true;
+            m_errorMessage = result.status().ToString();
+        }
+    }
+    
+    // ... (rest of Draw function is fine, it now works with the prepared data) ...
+}
+
+// ... DrawFileControls, DrawDataTable are fine ...
+
+void TimeSeriesWindow::UpdatePlotData() {
+    m_cachedPlotTimes.clear();
+    m_cachedPlotValues.clear();
+
+    if (!m_dataFrame || m_selectedIndicator.empty() || m_cachedIndicatorName == m_selectedIndicator) {
+        m_plotDataDirty = false;
+        return;
+    }
+
+    // --- REFACTOR: No more calls to with_unix_timestamp! ---
+    // The 'timestamp_unix' column is already guaranteed to exist.
+    
+    auto table = m_dataFrame->get_cpu_table();
+    auto values_col_res = m_dataFrame->get_column_view<double>(m_selectedIndicator);
+    auto times_col_res = m_dataFrame->get_column_view<int64_t>("timestamp_unix");
+
+    if (!values_col_res.ok() || !times_col_res.ok()) {
+        m_hasError = true;
+        m_errorMessage = "Could not get column views for plotting.";
+        m_plotDataDirty = false;
+        return;
+    }
+    
+    auto values_view = values_col_res.ValueOrDie();
+    auto times_view = times_col_res.ValueOrDie();
+
+    const double* values_data = values_view.data();
+    const int64_t* times_data = times_view.data();
+    size_t num_rows = values_view.size();
+    
+    m_cachedPlotValues.reserve(num_rows);
+    m_cachedPlotTimes.reserve(num_rows);
+
+    for (size_t i = 0; i < num_rows; ++i) {
+        // Here we assume ColumnView gives valid data. You might add isnan checks.
+        m_cachedPlotValues.push_back(values_data[i]);
+        m_cachedPlotTimes.push_back(static_cast<double>(times_data[i]));
+    }
+    
+    m_cachedIndicatorName = m_selectedIndicator;
+    m_plotDataDirty = false;
+    
+    std::cout << "[TimeSeriesWindow] Updated plot cache for " << m_selectedIndicator << std::endl;
+}
+
+// ... rest of file ...
+Summary of Benefits from These Changes
+Performance: Timestamp generation, a costly operation, now runs only once per file load instead of on every plot change. UI rendering is faster due to a cleaner separation of concerns.
+Clarity & Simplicity: The data flow is linear and easy to follow. AnalyticsDataFrame is the undisputed source of truth. The TimeSeriesWindow is now purely for presentation, not transformation.
+Robustness: The critical ColumnView bug is fixed, making your legacy analysis code reliable. The timestamp generation now correctly handles multi-chunk data.
+Maintainability: With the old TimeSeries.h logic gone and a clear data pipeline, the code is much easier to understand, debug, and extend.

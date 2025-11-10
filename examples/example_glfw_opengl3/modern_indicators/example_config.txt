@@ -1,0 +1,63 @@
+; Example indicator configuration file
+; Format: VARIABLE_NAME: INDICATOR_TYPE param1 param2 ...
+;
+; Extended syntax for flags:
+;   VARIABLE_NAME: INDICATOR_TYPE param1 param2 --flag=value
+;
+; Supported flags (indicator-specific):
+;   --method=<name>     Alternative computation method
+;   --order=<order>     Parameter order (e.g., down_first, up_first)
+;   --legacy=<bool>     Use legacy algorithm variant
+
+; --- RSI Indicators ---
+RSI_S: RSI 10
+RSI_M: RSI 50
+RSI_L: RSI 120
+
+; --- Trend Indicators ---
+TREND_S100: LINEAR PER ATR 10 100
+TREND_M100: LINEAR PER ATR 50 100
+TREND_L100: LINEAR PER ATR 120 100
+
+; --- Volatility Indicators ---
+ATR_RATIO_S: ATR RATIO 10 2.5
+ATR_RATIO_M: ATR RATIO 50 5.0
+
+; Price variance ratios
+PVR_10_3: PRICE VARIANCE RATIO 10 3
+CVR_10_3: CHANGE VARIANCE RATIO 10 3
+
+; Min/Max variance ratios
+MAX_CVR: MAX CHANGE VARIANCE RATIO 10 3 20
+VOL_MAX_PS: MAX PRICE VARIANCE RATIO 1 20 50
+
+; Bollinger width
+BOL_WIDTH_S: BOLLINGER WIDTH 20
+BOL_WIDTH_M: BOLLINGER WIDTH 60
+
+; --- Volume Indicators ---
+; Note: --order flag demonstrates extended syntax
+VOL_MOM_S: VOLUME MOMENTUM 10 5 --order=down_first
+VOL_MOM_L: VOLUME MOMENTUM 50 4
+
+OBV_S: ON BALANCE VOLUME 20
+OBV_M: ON BALANCE VOLUME 60
+
+; --- Moving Average Indicators ---
+MA_DIFF_S: MA DIFFERENCE 10 20 10
+MA_DIFF_M: MA DIFFERENCE 20 50 20
+
+; --- Deviations ---
+DEV_LIN_S: LINEAR DEVIATION 10
+DEV_LIN_M: LINEAR DEVIATION 40
+
+; --- ADX Family ---
+; ADX_S: ADX 14 --method=wilder
+ADX_S: ADX 14
+ADX_M: ADX 50
+ADX_L: ADX 120
+
+; --- Aroon Indicators ---
+; (Currently not in the var.txt but supported)
+; AROON_UP_S: AROON UP 14
+; AROON_DOWN_S: AROON DOWN 14

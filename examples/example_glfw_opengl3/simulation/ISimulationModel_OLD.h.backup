@@ -1,0 +1,107 @@
+#pragma once
+
+#include "SimulationTypes.h"
+#include <memory>
+#include <vector>
+#include <string>
+
+namespace simulation {
+
+// Abstract interface for all simulation models
+class ISimulationModel {
+public:
+    virtual ~ISimulationModel() = default;
+    
+    // Model identification
+    virtual std::string GetModelType() const = 0;
+    virtual std::string GetDescription() const = 0;
+    
+    // Training and prediction
+    virtual TrainingResult Train(
+        const std::vector<float>& X_train,  // Features (row-major)
+        const std::vector<float>& y_train,  // Targets
+        const std::vector<float>& X_val,
+        const std::vector<float>& y_val,
+        const ModelConfigBase& config,
+        int num_features
+    ) = 0;
+    
+    virtual PredictionResult Predict(
+        const std::vector<float>& X_test,
+        int num_samples,
+        int num_features
+    ) = 0;
+    
+    // Model serialization for caching
+    virtual std::vector<char> Serialize() const = 0;
+    virtual bool Deserialize(const std::vector<char>& buffer) = 0;
+    
+    // Configuration
+    virtual std::unique_ptr<ModelConfigBase> CreateDefaultConfig() const = 0;
+    virtual std::unique_ptr<ModelConfigBase> CloneConfig(const ModelConfigBase& config) const = 0;
+    
+    // UI rendering for model-specific parameters
+    // Returns true if configuration was modified
+    virtual bool RenderConfigUI(ModelConfigBase& config) = 0;
+    
+    // Get hyperparameter summary for display
+    virtual std::string GetHyperparameterSummary(const ModelConfigBase& config) const = 0;
+    
+    // Feature importance (optional - return empty if not supported)
+    virtual std::vector<std::pair<std::string, float>> GetFeatureImportance() const {
+        return {};
+    }
+    
+    // Check if model is available (e.g., library is installed)
+    virtual bool IsAvailable() const = 0;
+    virtual std::string GetAvailabilityError() const { return ""; }
+};
+
+// Factory for creating models
+class ModelFactory {
+public:
+    static std::unique_ptr<ISimulationModel> CreateModel(const std::string& model_type);
+    static std::vector<std::string> GetAvailableModels();
+    static bool IsModelAvailable(const std::string& model_type);
+};
+
+// Model cache for reusing models across folds
+class ModelCache {
+public:
+    struct CachedModel {
+        std::string model_type;
+        std::vector<char> model_buffer;
+        TransformParams transform_params;
+        float prediction_threshold_scaled;
+        float prediction_threshold_original;
+        float dynamic_positive_threshold;
+        int source_fold;
+        bool is_valid = false;
+    };
+    
+    void CacheModel(
+        const ISimulationModel& model,
+        const TransformParams& params,
+        float pred_thresh_scaled,
+        float pred_thresh_orig,
+        float dyn_pos_thresh,
+        int fold_number
+    );
+    
+    bool LoadCachedModel(
+        ISimulationModel& model,
+        TransformParams& params,
+        float& pred_thresh_scaled,
+        float& pred_thresh_orig,
+        float& dyn_pos_thresh
+    ) const;
+    
+    bool HasCachedModel() const { return m_cached.is_valid; }
+    int GetSourceFold() const { return m_cached.source_fold; }
+    void Clear() { m_cached = CachedModel(); }
+    
+private:
+    CachedModel m_cached;
+};
+
+} // namespace simulation

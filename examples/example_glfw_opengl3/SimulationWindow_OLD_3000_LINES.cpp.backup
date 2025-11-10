@@ -1,0 +1,2990 @@
+#include "SimulationWindow.h"
+#include "TimeSeriesWindow.h"
+#include <algorithm>
+#include <cstring>
+#include <cmath>
+#include <iostream>
+#include <map>
+#include <numeric>
+#include <arrow/scalar.h>
+#include <arrow/type.h>
+
+// Implementation of ModelRunConfiguration static method
+ModelRunConfiguration ModelRunConfiguration::FromSimulationConfig(const SimulationConfig& config,
+                                                                  int train_start, int train_end,
+                                                                  int test_start, int test_end) {
+    ModelRunConfiguration run_config;
+    
+    // Data split parameters
+    run_config.train_start_row = train_start;
+    run_config.train_end_row = train_end;
+    run_config.test_start_row = test_start;
+    run_config.test_end_row = test_end;
+    run_config.val_split_ratio = config.val_split_ratio;
+    
+    // Features and target
+    run_config.feature_columns = config.feature_columns;
+    run_config.target_column = config.target_column;
+    
+    // Transformation settings
+    run_config.use_standardization = config.use_standardization;
+    run_config.use_tanh_transform = config.use_tanh_transform;
+    run_config.tanh_scaling_factor = config.tanh_scaling_factor;
+    
+    // XGBoost hyperparameters
+    run_config.learning_rate = config.learning_rate;
+    run_config.max_depth = config.max_depth;
+    run_config.min_child_weight = config.min_child_weight;
+    run_config.subsample = config.subsample;
+    run_config.colsample_bytree = config.colsample_bytree;
+    run_config.lambda = config.lambda;
+    run_config.num_boost_round = config.num_boost_round;
+    run_config.early_stopping_rounds = config.early_stopping_rounds;
+    run_config.min_boost_rounds = config.min_boost_rounds;
+    
+    // Fixed execution parameters
+    run_config.random_seed = 43;
+    run_config.tree_method = "hist";
+    run_config.objective = "reg:squarederror";
+    run_config.device = "cuda";
+    
+    return run_config;
+}
+
+// Implementation of TestModelState methods
+void SimulationWindow::TestModelState::SetFromFold(const FoldResult& fold, const SimulationRun& run) {
+    // Mark configuration as coming from a fold
+    config_source = FROM_FOLD;
+    source_run_name = run.name;
+    source_fold_number = fold.fold_number;
+    
+    // Copy the complete configuration
+    current_config = fold.fold_configuration;
+    
+    // Update legacy fields for backward compatibility
+    train_start_row = fold.train_start;
+    train_end_row = fold.train_end;
+    test_start_row = fold.test_start;
+    test_end_row = fold.test_end;
+    
+    // Preserve exact transformation parameters and threshold from the fold
+    transform_params.mean = fold.mean_scale;
+    transform_params.std_dev = fold.std_scale;
+    transform_params.scaling_factor = fold.fold_configuration.tanh_scaling_factor;  // Use the fold's stored value
+    transform_params_manually_set = true;
+    
+    trading_threshold = fold.prediction_threshold_original;
+    threshold_manually_set = true;
+}
+
+void SimulationWindow::TestModelState::ResetToManual() {
+    config_source = MANUAL;
+    source_run_name.clear();
+    source_fold_number = -1;
+    
+    // Reset preservation flags
+    transform_params_manually_set = false;
+    threshold_manually_set = false;
+    
+    // Update current_config from manual inputs
+    current_config.train_start_row = train_start_row;
+    current_config.train_end_row = train_end_row;
+    current_config.test_start_row = test_start_row;
+    current_config.test_end_row = test_end_row;
+}
+
+bool SimulationWindow::TestModelState::ValidateConfiguration(int available_data_rows) const {
+    return current_config.IsValid() && current_config.IsCompatibleWith(available_data_rows);
+}
+
+SimulationWindow::SimulationWindow() 
+    : m_isVisible(false)
+    , m_timeSeriesWindow(nullptr)
+    , m_selectedTargetIndex(-1)
+    , m_isRunning(false)
+    , m_shouldStop(false)
+    , m_currentFold(0)
+    , m_totalFolds(0)
+    , m_currentRunIndex(-1)
+    , m_resultsUpdated(false)
+    , m_configPanelHeight(CONFIG_PANEL_MIN_HEIGHT)
+    , m_resultsPanelHeight(RESULTS_PANEL_MIN_HEIGHT)
+    , m_autoScrollTable(true)
+    , m_autoFitPlot(true)
+    , m_hasCopiedFeatures(false)
+    , m_hasCopiedHyperparameters(false) {
+}
+
+SimulationWindow::~SimulationWindow() {
+    StopSimulation();
+}
+
+void SimulationWindow::Draw() {
+    if (!m_isVisible) return;
+    
+    ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Trading Simulation", &m_isVisible, ImGuiWindowFlags_MenuBar)) {
+        ImGui::End();
+        return;
+    }
+    
+    // Menu bar
+    if (ImGui::BeginMenuBar()) {
+        if (ImGui::BeginMenu("Simulation")) {
+            if (ImGui::MenuItem("Reset", nullptr, false, !m_isRunning.load())) {
+                ResetSimulation();
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMenuBar();
+    }
+    
+    // Update column lists if data is available
+    if (m_timeSeriesWindow && m_timeSeriesWindow->HasData()) {
+        UpdateColumnLists();
+    }
+    
+    // Main tab bar for switching between Simulation and Test Model
+    if (ImGui::BeginTabBar("MainSimulationTabs")) {
+        if (ImGui::BeginTabItem("Simulation")) {
+            // Fixed layout for simulation
+            ImVec2 contentRegion = ImGui::GetContentRegionAvail();
+            float configHeight = 350.0f;  // Fixed height for configuration
+            float controlsHeight = 60.0f; // Fixed height for controls
+            float resultsHeight = contentRegion.y - configHeight - controlsHeight - 10.0f; // Remaining for results
+            
+            // Configuration panel
+            if (ImGui::BeginChild("ConfigPanel", ImVec2(0, configHeight), true)) {
+                DrawConfigurationTabs();
+            }
+            ImGui::EndChild();
+            
+            // Simulation controls
+            if (ImGui::BeginChild("SimulationControls", ImVec2(0, controlsHeight), true, ImGuiWindowFlags_NoScrollbar)) {
+                DrawSimulationControls();
+            }
+            ImGui::EndChild();
+            
+            // Results panel
+            if (ImGui::BeginChild("ResultsPanel", ImVec2(0, resultsHeight), true)) {
+                DrawResults();
+            }
+            ImGui::EndChild();
+            
+            ImGui::EndTabItem();
+        }
+        
+        if (ImGui::BeginTabItem("Test Model")) {
+            // Test model has its own layout without simulation controls
+            DrawTestModel();
+            ImGui::EndTabItem();
+        }
+        
+        ImGui::EndTabBar();
+    }
+    
+    ImGui::End();
+}
+
+void SimulationWindow::DrawConfigurationTabs() {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No time series data loaded.");
+        ImGui::Text("Please load data in the Time Series window first.");
+        return;
+    }
+    
+    // Show copy status at the top
+    if (m_hasCopiedFeatures || m_hasCopiedHyperparameters) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.3f, 0.1f, 0.3f));
+        if (ImGui::BeginChild("CopyStatus", ImVec2(0, 30), true, ImGuiWindowFlags_NoScrollbar)) {
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Copied Configuration Available: ");
+            ImGui::SameLine();
+            if (m_hasCopiedFeatures) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[%d Features]", (int)m_copiedFeatureColumns.size());
+                if (m_hasCopiedHyperparameters) {
+                    ImGui::SameLine();
+                }
+            }
+            if (m_hasCopiedHyperparameters) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[Hyperparameters]");
+            }
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "- Use 'Set Copied' buttons in tabs below");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+    
+    if (ImGui::BeginTabBar("ConfigTabs")) {
+        if (ImGui::BeginTabItem("Features & Target")) {
+            ImVec2 tabRegion = ImGui::GetContentRegionAvail();
+            float columnWidth = tabRegion.x * 0.5f - 5.0f;
+            
+            // Feature selection (left column)
+            if (ImGui::BeginChild("FeatureSelection", ImVec2(columnWidth, 0), true)) {
+                DrawFeatureSelection();
+            }
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
+            // Target selection (right column)
+            if (ImGui::BeginChild("TargetSelection", ImVec2(columnWidth, 0), true)) {
+                DrawTargetSelection();
+            }
+            ImGui::EndChild();
+            
+            ImGui::EndTabItem();
+        }
+        
+        if (ImGui::BeginTabItem("Hyperparameters")) {
+            DrawHyperparameters();
+            ImGui::EndTabItem();
+        }
+        
+        ImGui::EndTabBar();
+    }
+}
+
+void SimulationWindow::DrawFeatureSelection() {
+    ImGui::Text("Feature Columns");
+    
+    // Add paste button if we have copied features
+    if (m_hasCopiedFeatures) {
+        ImGui::SameLine();
+        if (ImGui::Button("Paste Features")) {
+            // Clear current selection
+            for (auto& [name, selected] : m_sortedFeatures) {
+                selected = false;
+            }
+            
+            // Set the copied features
+            for (const auto& copiedFeature : m_copiedFeatureColumns) {
+                for (auto& [name, selected] : m_sortedFeatures) {
+                    if (name == copiedFeature) {
+                        selected = true;
+                        break;
+                    }
+                }
+            }
+            
+            // Set the target column
+            for (size_t i = 0; i < m_availableTargetColumns.size(); ++i) {
+                if (m_availableTargetColumns[i] == m_copiedTargetColumn) {
+                    m_selectedTargetIndex = i;
+                    m_config.target_column = m_copiedTargetColumn;
+                    break;
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Paste %d features and target '%s'", 
+                            (int)m_copiedFeatureColumns.size(), 
+                            m_copiedTargetColumn.c_str());
+        }
+    }
+    
+    ImGui::Separator();
+    
+    if (m_availableFeatureColumns.empty()) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No feature columns available");
+        return;
+    }
+    
+    // Select all / None buttons
+    if (ImGui::Button("Select All")) {
+        for (auto& [name, selected] : m_sortedFeatures) {
+            selected = true;
+        }
+        // Update the original selection vector
+        for (const auto& [name, selected] : m_sortedFeatures) {
+            auto it = std::find(m_availableFeatureColumns.begin(), m_availableFeatureColumns.end(), name);
+            if (it != m_availableFeatureColumns.end()) {
+                size_t idx = it - m_availableFeatureColumns.begin();
+                if (idx < m_selectedFeatures.size()) {
+                    m_selectedFeatures[idx] = selected;
+                }
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Select None")) {
+        for (auto& [name, selected] : m_sortedFeatures) {
+            selected = false;
+        }
+        std::fill(m_selectedFeatures.begin(), m_selectedFeatures.end(), false);
+    }
+    
+    // Set Features button - always visible but disabled when nothing copied
+    if (!m_hasCopiedFeatures) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Set Copied Features");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("No features copied yet. Run a simulation and use 'Copy Features' button in Results.");
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.1f, 1.0f));
+        if (ImGui::Button("Set Copied Features")) {
+            // Clear all selections first
+            for (auto& [name, selected] : m_sortedFeatures) {
+                selected = false;
+            }
+            std::fill(m_selectedFeatures.begin(), m_selectedFeatures.end(), false);
+            
+            // Set only the copied features
+            for (const auto& copiedFeature : m_copiedFeatureColumns) {
+                // Update sorted features
+                for (auto& [name, selected] : m_sortedFeatures) {
+                    if (name == copiedFeature) {
+                        selected = true;
+                        break;
+                    }
+                }
+                // Update original selection vector
+                auto it = std::find(m_availableFeatureColumns.begin(), m_availableFeatureColumns.end(), copiedFeature);
+                if (it != m_availableFeatureColumns.end()) {
+                    size_t idx = it - m_availableFeatureColumns.begin();
+                    if (idx < m_selectedFeatures.size()) {
+                        m_selectedFeatures[idx] = true;
+                    }
+                }
+            }
+            
+            // Set the target as well
+            if (!m_copiedTargetColumn.empty()) {
+                auto it = std::find(m_availableTargetColumns.begin(), m_availableTargetColumns.end(), m_copiedTargetColumn);
+                if (it != m_availableTargetColumns.end()) {
+                    m_selectedTargetIndex = it - m_availableTargetColumns.begin();
+                }
+            }
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Apply copied features (%d features, target: %s)", 
+                            (int)m_copiedFeatureColumns.size(), 
+                            m_copiedTargetColumn.c_str());
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "(%d features, target: %s)", 
+                          (int)m_copiedFeatureColumns.size(), 
+                          m_copiedTargetColumn.c_str());
+    }
+    
+    ImGui::Separator();
+    
+    // Feature checkboxes (sorted alphabetically)
+    for (auto& [name, selected] : m_sortedFeatures) {
+        if (ImGui::Checkbox(name.c_str(), &selected)) {
+            // Update the original selection vector
+            auto it = std::find(m_availableFeatureColumns.begin(), m_availableFeatureColumns.end(), name);
+            if (it != m_availableFeatureColumns.end()) {
+                size_t idx = it - m_availableFeatureColumns.begin();
+                if (idx < m_selectedFeatures.size()) {
+                    m_selectedFeatures[idx] = selected;
+                }
+            }
+        }
+        
+        // Right-click context menu
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            // Simply pass the indicator name - TimeSeriesWindow will handle everything
+            if (m_timeSeriesWindow) {
+                m_timeSeriesWindow->SelectIndicator(name);
+            }
+        }
+        
+        // Tooltip on hover
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Right-click to view in Time Series and Histogram");
+        }
+    }
+    
+    // Show selected count
+    int selectedCount = 0;
+    for (const auto& [name, selected] : m_sortedFeatures) {
+        if (selected) selectedCount++;
+    }
+    ImGui::Separator();
+    ImGui::Text("Selected: %d / %d", selectedCount, (int)m_sortedFeatures.size());
+}
+
+void SimulationWindow::DrawTargetSelection() {
+    ImGui::Text("Target Column");
+    ImGui::Separator();
+    
+    if (m_availableTargetColumns.empty()) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No target columns available");
+        ImGui::TextWrapped("Target columns should start with 'tgt' or 'TGT'");
+        return;
+    }
+    
+    // Target radio buttons
+    for (size_t i = 0; i < m_availableTargetColumns.size(); ++i) {
+        bool selected = (m_selectedTargetIndex == (int)i);
+        if (ImGui::RadioButton(m_availableTargetColumns[i].c_str(), selected)) {
+            m_selectedTargetIndex = (int)i;
+        }
+    }
+    
+    if (m_selectedTargetIndex >= 0 && m_selectedTargetIndex < (int)m_availableTargetColumns.size()) {
+        ImGui::Separator();
+        ImGui::Text("Selected: %s", m_availableTargetColumns[m_selectedTargetIndex].c_str());
+    }
+}
+
+void SimulationWindow::DrawHyperparameters() {
+    ImGui::Text("XGBoost Parameters");
+    
+    // Add set hyperparameters button - always visible but disabled when nothing copied
+    ImGui::SameLine();
+    if (!m_hasCopiedHyperparameters) {
+        ImGui::BeginDisabled();
+        ImGui::Button("Set Copied Hyperparameters");
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("No hyperparameters copied yet. Run a simulation and use 'Copy Hyperparameters' button in Results.");
+        }
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.1f, 1.0f));
+        if (ImGui::Button("Set Copied Hyperparameters")) {
+            // Copy all hyperparameters from the copied configuration
+            m_config.learning_rate = m_copiedConfig.learning_rate;
+            m_config.max_depth = m_copiedConfig.max_depth;
+            m_config.min_child_weight = m_copiedConfig.min_child_weight;
+            m_config.subsample = m_copiedConfig.subsample;
+            m_config.colsample_bytree = m_copiedConfig.colsample_bytree;
+            m_config.lambda = m_copiedConfig.lambda;
+            m_config.num_boost_round = m_copiedConfig.num_boost_round;
+            m_config.early_stopping_rounds = m_copiedConfig.early_stopping_rounds;
+            m_config.min_boost_rounds = m_copiedConfig.min_boost_rounds;
+            m_config.val_split_ratio = m_copiedConfig.val_split_ratio;
+            
+            // Copy transformation options
+            m_config.use_standardization = m_copiedConfig.use_standardization;
+            m_config.use_tanh_transform = m_copiedConfig.use_tanh_transform;
+            m_config.tanh_scaling_factor = m_copiedConfig.tanh_scaling_factor;
+            
+            // Copy data split configuration
+            m_config.train_test_gap = m_copiedConfig.train_test_gap;
+            m_config.train_size = m_copiedConfig.train_size;
+            m_config.test_size = m_copiedConfig.test_size;
+            m_config.fold_step = m_copiedConfig.fold_step;
+            m_config.start_fold = m_copiedConfig.start_fold;
+            m_config.end_fold = m_copiedConfig.end_fold;
+            m_config.initial_offset = m_copiedConfig.initial_offset;
+            
+            // Copy performance options
+            m_config.force_minimum_training = m_copiedConfig.force_minimum_training;
+            m_config.reuse_previous_model = m_copiedConfig.reuse_previous_model;
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Apply all hyperparameters including transformation and data split settings");
+        }
+    }
+    
+    ImGui::Separator();
+    
+    ImGui::SliderFloat("Learning Rate", &m_config.learning_rate, 0.001f, 0.3f, "%.3f");
+    ImGui::SliderInt("Max Depth", &m_config.max_depth, 1, 10);
+    ImGui::SliderFloat("Min Child Weight", &m_config.min_child_weight, 1.0f, 50.0f, "%.1f");
+    ImGui::SliderFloat("Subsample", &m_config.subsample, 0.3f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Col Sample by Tree", &m_config.colsample_bytree, 0.3f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Lambda (L2 Reg)", &m_config.lambda, 0.0f, 10.0f, "%.1f");
+    
+    ImGui::Separator();
+    ImGui::Text("Training Parameters");
+    ImGui::SliderInt("Num Boost Rounds", &m_config.num_boost_round, 100, 5000);
+    ImGui::SliderInt("Min Boost Rounds", &m_config.min_boost_rounds, 0, 500);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Minimum iterations before early stopping is allowed\nPrevents premature stopping for better accuracy");
+    }
+    ImGui::SliderInt("Early Stopping", &m_config.early_stopping_rounds, 10, 200);
+    ImGui::SliderFloat("Validation Split", &m_config.val_split_ratio, 0.5f, 0.9f, "%.2f");
+    
+    ImGui::Separator();
+    ImGui::Text("Target Transformation");
+    ImGui::Checkbox("Use Standardization", &m_config.use_standardization);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Apply z-score standardization to target values");
+    }
+    
+    ImGui::Checkbox("Use Tanh Transform", &m_config.use_tanh_transform);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Apply tanh transformation to handle outliers (like Python implementation)");
+    }
+    
+    if (m_config.use_tanh_transform) {
+        ImGui::SliderFloat("Tanh Scaling Factor", &m_config.tanh_scaling_factor, 0.0001f, 0.01f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Scaling factor before tanh transformation (default 0.001 from Python)");
+        }
+    }
+    
+    ImGui::Separator();
+    ImGui::Text("Data Split Configuration");
+    
+    // Use InputInt with 1000 step for train size
+    ImGui::Text("Train Size (bars):");
+    ImGui::SameLine();
+    ImGui::InputInt("##train_size", &m_config.train_size, 1000, 5000);
+    m_config.train_size = std::max(1000, std::min(20000, m_config.train_size));  // Clamp to valid range
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Number of bars to use for training data (1000-20000, step 1000)");
+    }
+    
+    // Use InputInt with 50 step for test size
+    ImGui::Text("Test Size (bars):");
+    ImGui::SameLine();
+    ImGui::InputInt("##test_size", &m_config.test_size, 50, 200);
+    m_config.test_size = std::max(50, std::min(1000, m_config.test_size));  // Clamp to valid range
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Number of bars to use for test data (50-1000, step 50)");
+    }
+    
+    ImGui::SliderInt("Train-Test Gap (bars)", &m_config.train_test_gap, 0, 50);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Number of bars to skip between training and test sets to avoid data leakage");
+    }
+    
+    ImGui::SliderInt("Fold Step (bars)", &m_config.fold_step, 50, 500);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Step size between consecutive folds");
+    }
+    
+    ImGui::SliderInt("Start Fold", &m_config.start_fold, 0, 200);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Starting fold number");
+    }
+    
+    // Calculate max folds dynamically
+    if (m_timeSeriesWindow && m_timeSeriesWindow->HasData()) {
+        const auto* df = m_timeSeriesWindow->GetDataFrame();
+        int64_t numRows = df->num_rows();
+        int maxPossibleFolds = CalculateMaxFolds(numRows, m_config);
+        
+        ImGui::SliderInt("End Fold", &m_config.end_fold, -1, maxPossibleFolds);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Ending fold number (-1 for auto-calculate based on data size)");
+        }
+        
+        ImGui::Text("Max possible folds: %d", maxPossibleFolds);
+    } else {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Load data to see max folds");
+    }
+    
+    // Convert initial offset to folds for display
+    int initial_offset_folds = m_config.initial_offset / m_config.fold_step;
+    ImGui::Text("Initial Offset (folds):");
+    ImGui::SameLine();
+    if (ImGui::InputInt("##initial_offset_folds", &initial_offset_folds, 1, 10)) {
+        m_config.initial_offset = initial_offset_folds * m_config.fold_step;
+    }
+    initial_offset_folds = std::max(0, std::min(200, initial_offset_folds));  // Clamp to reasonable range
+    m_config.initial_offset = initial_offset_folds * m_config.fold_step;  // Update actual offset
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Initial offset in folds (actual offset: %d bars)", m_config.initial_offset);
+    }
+    
+    ImGui::Separator();
+    ImGui::Text("Performance");
+    ImGui::Checkbox("Force Min Training", &m_config.force_minimum_training);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Force minimum iterations even if model doesn't improve from random initialization\nHelps avoid models that stop at 0-1 iterations");
+    }
+    
+    ImGui::Checkbox("Reuse Previous Model", &m_config.reuse_previous_model);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("When a fold fails to learn (BestIter=0), reuse the last successful model\nThis avoids trading with random models on difficult data periods");
+    }
+}
+
+void SimulationWindow::DrawSimulationControls() {
+    // Show data info
+    if (m_timeSeriesWindow && m_timeSeriesWindow->HasData()) {
+        const auto* df = m_timeSeriesWindow->GetDataFrame();
+        int64_t numRows = df->num_rows();
+        
+        // Calculate max possible folds based on current configuration
+        int maxFolds = CalculateMaxFolds(numRows, m_config);
+        int actualEndFold = (m_config.end_fold == -1) ? maxFolds : std::min(m_config.end_fold, maxFolds);
+        int numFolds = std::max(0, actualEndFold - m_config.start_fold + 1);
+        
+        ImGui::Text("Dataset: %lld rows, %d folds (from %d to %d)", 
+                   (long long)numRows, numFolds, m_config.start_fold, actualEndFold);
+        
+        // Show detailed breakdown
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Train: %d bars, Test: %d bars, Gap: %d bars\nFold step: %d bars, Initial offset: %d bars",
+                            m_config.train_size, m_config.test_size, m_config.train_test_gap,
+                            m_config.fold_step, m_config.initial_offset);
+        }
+    }
+    
+    // Validation configuration
+    bool canStart = m_selectedTargetIndex >= 0 && 
+                   std::count(m_selectedFeatures.begin(), m_selectedFeatures.end(), true) > 0;
+    
+    // Start/Stop buttons
+    bool isRunning = m_isRunning.load();
+    ImGui::BeginDisabled(!canStart || isRunning);
+    if (ImGui::Button("Start Simulation", ImVec2(120, 0))) {
+        StartSimulation();
+    }
+    ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!isRunning);
+    if (ImGui::Button("Stop", ImVec2(60, 0))) {
+        StopSimulation();
+    }
+    ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    ImGui::BeginDisabled(isRunning);
+    if (ImGui::Button("Reset", ImVec2(60, 0))) {
+        ResetSimulation();
+    }
+    ImGui::EndDisabled();
+    
+    // Progress bar right next to buttons (when running or has results)
+    if (isRunning || !m_simulationRuns.empty()) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1); // Use remaining width
+        DrawProgressBar();
+    }
+    
+    // Validation warnings (compact)
+    if (!canStart) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
+                          "Required: %s%s", 
+                          m_selectedTargetIndex < 0 ? "target column" : "",
+                          (m_selectedTargetIndex < 0 && std::count(m_selectedFeatures.begin(), m_selectedFeatures.end(), true) == 0) ? " & features" :
+                          (std::count(m_selectedFeatures.begin(), m_selectedFeatures.end(), true) == 0) ? "feature columns" : "");
+    }
+}
+
+void SimulationWindow::DrawResults() {
+    if (m_simulationRuns.empty()) {
+        // Don't show anything - let the space collapse
+        return;
+    }
+    
+    // Profit plot
+    ImVec2 availableRegion = ImGui::GetContentRegionAvail();
+    float plotHeight = availableRegion.y * 0.5f; // Use half of available space for plot
+    
+    if (ImGui::BeginChild("PlotRegion", ImVec2(0, plotHeight), false)) {
+        DrawProfitPlot();
+    }
+    ImGui::EndChild();
+    
+    ImGui::Separator();
+    
+    // Results table below the plot (with tabs for each run)
+    if (ImGui::BeginChild("TableRegion", ImVec2(0, 0), false)) {
+        if (ImGui::BeginTabBar("RunTabs")) {
+            std::lock_guard<std::mutex> lock(m_resultsMutex);
+            for (size_t i = 0; i < m_simulationRuns.size(); ++i) {
+                const auto& run = m_simulationRuns[i];
+                bool open = true;
+                if (ImGui::BeginTabItem(run.name.c_str(), &open)) {
+                    DrawResultsTable(i);
+                    ImGui::EndTabItem();
+                }
+                if (!open) {
+                    // User closed the tab, remove this run
+                    m_simulationRuns.erase(m_simulationRuns.begin() + i);
+                    break; // Break to avoid iterator invalidation
+                }
+            }
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::EndChild();
+}
+
+void SimulationWindow::DrawProgressBar() {
+    int currentFold = m_currentFold.load();
+    int totalFolds = m_totalFolds.load();
+    
+    if (totalFolds > 0) {
+        float progress = static_cast<float>(currentFold) / totalFolds;
+        char progressText[64];
+        snprintf(progressText, sizeof(progressText), "%d / %d", currentFold, totalFolds);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), progressText);
+    }
+}
+
+void SimulationWindow::DrawResultsTable(int runIndex) {
+    if (runIndex < 0 || runIndex >= (int)m_simulationRuns.size()) {
+        return;
+    }
+    
+    const auto& run = m_simulationRuns[runIndex];
+    
+    // Comprehensive Configuration Display (Collapsible)
+    if (ImGui::CollapsingHeader("Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Copy buttons
+        if (ImGui::Button("Copy All")) {
+            m_copiedFeatureColumns = run.config.feature_columns;
+            m_copiedTargetColumn = run.config.target_column;
+            m_copiedConfig = run.config;
+            m_hasCopiedFeatures = true;
+            m_hasCopiedHyperparameters = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy entire configuration (features, target, and hyperparameters)");
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Copy Features")) {
+            m_copiedFeatureColumns = run.config.feature_columns;
+            m_copiedTargetColumn = run.config.target_column;
+            m_hasCopiedFeatures = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy %d features and target '%s'", 
+                            (int)run.config.feature_columns.size(), 
+                            run.config.target_column.c_str());
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Copy Hyperparameters")) {
+            m_copiedConfig = run.config;
+            m_hasCopiedHyperparameters = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Copy all hyperparameters:\n"
+                            "- XGBoost: LR:%.3f, Depth:%d, Rounds:%d\n"
+                            "- Transform: Std:%s, Tanh:%s (scale:%.3f)\n"
+                            "- Data: Train:%d, Test:%d, Gap:%d\n"
+                            "- Model Reuse: %s", 
+                            run.config.learning_rate, 
+                            run.config.max_depth,
+                            run.config.num_boost_round,
+                            run.config.use_standardization ? "Yes" : "No",
+                            run.config.use_tanh_transform ? "Yes" : "No",
+                            run.config.tanh_scaling_factor,
+                            run.config.train_size,
+                            run.config.test_size,
+                            run.config.train_test_gap,
+                            run.config.reuse_previous_model ? "Yes" : "No");
+        }
+        
+        // Show copy status
+        if (m_hasCopiedFeatures || m_hasCopiedHyperparameters) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "[Copied: ");
+            ImGui::SameLine(0, 0);
+            if (m_hasCopiedFeatures) {
+                ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "Features");
+                if (m_hasCopiedHyperparameters) {
+                    ImGui::SameLine(0, 0);
+                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), ", ");
+                }
+            }
+            if (m_hasCopiedHyperparameters) {
+                ImGui::SameLine(0, 0);
+                ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "Hyperparams");
+            }
+            ImGui::SameLine(0, 0);
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "]");
+        }
+        
+        ImGui::Separator();
+        
+        // Features section
+        ImGui::Text("Features (%d):", (int)run.config.feature_columns.size());
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Target: %s", run.config.target_column.c_str());
+        
+        // Display features in a scrollable child window
+        if (ImGui::BeginChild("FeaturesDisplay", ImVec2(0, 100), true)) {
+            std::string featuresText;
+            for (size_t i = 0; i < run.config.feature_columns.size(); ++i) {
+                if (i > 0) featuresText += ", ";
+                featuresText += run.config.feature_columns[i];
+                if ((i + 1) % 5 == 0 && i < run.config.feature_columns.size() - 1) {
+                    ImGui::TextWrapped("%s", featuresText.c_str());
+                    featuresText.clear();
+                }
+            }
+            if (!featuresText.empty()) {
+                ImGui::TextWrapped("%s", featuresText.c_str());
+            }
+        }
+        ImGui::EndChild();
+        
+        // Hyperparameters section
+        ImGui::Text("Hyperparameters:");
+        ImGui::Columns(2, "HyperparamsColumns", false);
+        
+        ImGui::Text("Learning Rate: %.3f", run.config.learning_rate);
+        ImGui::Text("Max Depth: %d", run.config.max_depth);
+        ImGui::Text("Min Child Weight: %.1f", run.config.min_child_weight);
+        ImGui::Text("Subsample: %.2f", run.config.subsample);
+        
+        ImGui::NextColumn();
+        
+        ImGui::Text("Col Sample: %.2f", run.config.colsample_bytree);
+        ImGui::Text("Lambda: %.1f", run.config.lambda);
+        ImGui::Text("Rounds: %d", run.config.num_boost_round);
+        ImGui::Text("Early Stop: %d", run.config.early_stopping_rounds);
+        
+        ImGui::Columns(1);
+        ImGui::Text("Validation Split: %.2f", run.config.val_split_ratio);
+        
+        ImGui::Separator();
+    }
+    
+    ImGui::Checkbox("Auto-scroll", &m_autoScrollTable);
+    
+    if (ImGui::BeginTable("ResultsTable", 7, 
+                         ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | 
+                         ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
+        
+        // Headers
+        ImGui::TableSetupColumn("Fold", ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Signals", ImGuiTableColumnFlags_WidthFixed, 80);
+        ImGui::TableSetupColumn("Signal Rate", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("Avg Return", ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn("Hit Rate", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn("Running Sum", ImGuiTableColumnFlags_WidthFixed, 120);
+        ImGui::TableSetupColumn("Best Score", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+        
+        // Data rows
+        int startRow = 0;
+        if ((int)run.foldResults.size() > MAX_VISIBLE_RESULTS) {
+            startRow = (int)run.foldResults.size() - MAX_VISIBLE_RESULTS;
+        }
+        
+        for (int i = startRow; i < (int)run.foldResults.size(); ++i) {
+            const auto& result = run.foldResults[i];
+            result.UpdateCache();
+            
+            ImGui::TableNextRow();
+            
+            // Set row color based on model status
+            ImVec4 textColor;
+            if (result.model_learned_nothing && !result.used_cached_model) {
+                textColor = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);  // Red for non-learning models with no cache
+            } else if (result.used_cached_model) {
+                textColor = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);  // Yellow/orange for cached model use
+            } else {
+                textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);  // Normal text color
+            }
+            
+            ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+            
+            // Draw the data columns
+            ImGui::TableSetColumnIndex(0);
+            ImGui::Selectable(result.fold_str.c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+            bool row_clicked = ImGui::IsItemClicked();
+            
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%s", result.signals_str.c_str());
+            
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%s", result.rate_str.c_str());
+            
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%s", result.return_str.c_str());
+            
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Text("%s", result.hit_str.c_str());
+            
+            ImGui::TableSetColumnIndex(5);
+            ImGui::Text("%s", result.sum_str.c_str());
+            
+            ImGui::TableSetColumnIndex(6);
+            ImGui::Text("%.4f", result.best_score);
+            
+            ImGui::PopStyleColor();  // Restore normal text color
+            
+            // Show popup when row is clicked
+            char popup_id[32];
+            snprintf(popup_id, sizeof(popup_id), "FoldPopup_%d_%d", runIndex, i);
+            
+            if (row_clicked) {
+                ImGui::OpenPopup(popup_id);
+            }
+            
+            // Create the popup
+            if (ImGui::BeginPopup(popup_id)) {
+                ImGui::Text("Fold %d Details", result.fold_number);
+                ImGui::Separator();
+                
+                ImGui::Text("Training: rows %d to %d", result.train_start, result.train_end);
+                ImGui::Text("Testing: rows %d to %d", result.test_start, result.test_end);
+                ImGui::Text("Train samples: %d", result.n_train_samples);
+                ImGui::Text("Test samples: %d", result.n_test_samples);
+                ImGui::Text("Best iteration: %d", result.best_iteration);
+                
+                if (result.model_learned_nothing) {
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "Warning: Model did not learn");
+                }
+                if (result.used_cached_model) {
+                    ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "Note: Used cached model");
+                }
+                
+                ImGui::Separator();
+                
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Original Results:");
+                ImGui::Text("Hit Rate: %.2f%%", result.hit_rate * 100.0f);
+                ImGui::Text("Signals: %d", result.n_signals);
+                ImGui::Text("Threshold: %.6f", result.prediction_threshold_original);
+                
+                ImGui::Separator();
+                
+                if (ImGui::Button("Examine Fold in Test Model", ImVec2(-1, 0))) {
+                    // Use the new SetFromFold method
+                    m_testModelState.SetFromFold(result, run);
+                    
+                    // Debug: Show what we're transferring
+                    std::cout << "\n=== Transferring Fold " << result.fold_number << " to Test Model ===" << std::endl;
+                    std::cout << "Source: " << run.name << " - Fold " << result.fold_number << std::endl;
+                    std::cout << "Train: [" << result.train_start << ", " << result.train_end << "]" << std::endl;
+                    std::cout << "Test: [" << result.test_start << ", " << result.test_end << "]" << std::endl;
+                    std::cout << "Val split: " << run.config.val_split_ratio << std::endl;
+                    std::cout << "Features (" << run.config.feature_columns.size() << "): ";
+                    for (const auto& f : run.config.feature_columns) {
+                        std::cout << f << " ";
+                    }
+                    std::cout << "\nTarget: " << run.config.target_column << std::endl;
+                    std::cout << "Hyperparameters: lr=" << run.config.learning_rate 
+                              << ", depth=" << run.config.max_depth 
+                              << ", mcw=" << run.config.min_child_weight << std::endl;
+                    std::cout << "Transform: " << (run.config.use_tanh_transform ? "tanh" : 
+                                                   run.config.use_standardization ? "standardize" : "none") << std::endl;
+                    std::cout << "==========================================\n" << std::endl;
+                    
+                    // Copy the configuration from this run for UI consistency
+                    m_config = run.config;
+                    
+                    // Update selected features to match the run
+                    std::fill(m_selectedFeatures.begin(), m_selectedFeatures.end(), false);
+                    for (const auto& feature : run.config.feature_columns) {
+                        auto it = std::find(m_availableFeatureColumns.begin(), 
+                                           m_availableFeatureColumns.end(), feature);
+                        if (it != m_availableFeatureColumns.end()) {
+                            size_t idx = it - m_availableFeatureColumns.begin();
+                            if (idx < m_selectedFeatures.size()) {
+                                m_selectedFeatures[idx] = true;
+                            }
+                        }
+                    }
+                    
+                    // Update sorted features
+                    for (auto& [name, selected] : m_sortedFeatures) {
+                        selected = std::find(run.config.feature_columns.begin(), 
+                                            run.config.feature_columns.end(), name) != 
+                                  run.config.feature_columns.end();
+                    }
+                    
+                    // Set target
+                    auto target_it = std::find(m_availableTargetColumns.begin(), 
+                                              m_availableTargetColumns.end(), 
+                                              run.config.target_column);
+                    if (target_it != m_availableTargetColumns.end()) {
+                        m_selectedTargetIndex = target_it - m_availableTargetColumns.begin();
+                    }
+                    
+                    ImGui::CloseCurrentPopup();
+                    
+                    // Show success message
+                    ImGui::SetItemTooltip("Parameters transferred! Switch to Test Model tab to examine this fold.");
+                }
+                
+                if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                
+                ImGui::EndPopup();
+            }
+        }
+        
+        if (m_autoScrollTable && m_resultsUpdated) {
+            ImGui::SetScrollHereY(1.0f);
+            m_resultsUpdated = false;
+        }
+        
+        ImGui::EndTable();
+    }
+}
+
+void SimulationWindow::DrawProfitPlot() {
+    std::lock_guard<std::mutex> lock(m_resultsMutex);
+    
+    if (m_simulationRuns.empty()) {
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No profit data to plot.");
+        return;
+    }
+    
+    ImGui::Checkbox("Auto-fit", &m_autoFitPlot);
+    
+    if (ImPlot::BeginPlot("Cumulative Profit", ImVec2(-1, -1))) {
+        ImPlot::SetupAxis(ImAxis_X1, "Fold Number");
+        ImPlot::SetupAxis(ImAxis_Y1, "Running Sum");
+        
+        // Find overall bounds for auto-fit
+        if (m_autoFitPlot) {
+            double minX = std::numeric_limits<double>::max();
+            double maxX = std::numeric_limits<double>::min();
+            double minY = std::numeric_limits<double>::max();
+            double maxY = std::numeric_limits<double>::min();
+            
+            for (const auto& run : m_simulationRuns) {
+                if (!run.profitPlotX.empty()) {
+                    minX = std::min(minX, *std::min_element(run.profitPlotX.begin(), run.profitPlotX.end()));
+                    maxX = std::max(maxX, *std::max_element(run.profitPlotX.begin(), run.profitPlotX.end()));
+                    minY = std::min(minY, *std::min_element(run.profitPlotY.begin(), run.profitPlotY.end()));
+                    maxY = std::max(maxY, *std::max_element(run.profitPlotY.begin(), run.profitPlotY.end()));
+                }
+            }
+            
+            if (minX != std::numeric_limits<double>::max()) {
+                ImPlot::SetupAxesLimits(minX, maxX, minY, maxY, ImGuiCond_Always);
+            }
+        }
+        
+        // Plot each run with its own color
+        for (const auto& run : m_simulationRuns) {
+            if (!run.profitPlotX.empty()) {
+                ImPlot::SetNextLineStyle(run.plotColor);
+                ImPlot::PlotLine(run.name.c_str(), run.profitPlotX.data(), run.profitPlotY.data(), 
+                                (int)run.profitPlotX.size());
+            }
+        }
+        
+        ImPlot::EndPlot();
+    }
+}
+
+int SimulationWindow::CalculateMaxFolds(int64_t numRows, const SimulationConfig& config) const {
+    // Calculate the maximum number of folds based on data size and configuration
+    // For fold f, we need: initial_offset + (f - start_fold) * fold_step + train_size + gap + test_size <= numRows
+    // Solving for f: f <= (numRows - initial_offset - train_size - gap - test_size) / fold_step + start_fold
+    
+    int64_t availableRows = numRows - config.initial_offset - config.train_size - config.train_test_gap - config.test_size;
+    if (availableRows < 0) {
+        return config.start_fold - 1;  // Can't even fit one fold
+    }
+    
+    // Calculate max fold number (not count of folds)
+    int maxFoldNumber = static_cast<int>(availableRows / config.fold_step) + config.start_fold;
+    return maxFoldNumber;
+}
+
+void SimulationWindow::UpdateColumnLists() {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        return;
+    }
+    
+    const auto* df = m_timeSeriesWindow->GetDataFrame();
+    auto columnNames = df->column_names();
+    
+    // Default feature columns to check if they exist
+    std::vector<std::string> defaultFeatures = {
+        "BOL_WIDTH_M", "CMMA_S", "DTR_RSI_M", "PV_FIT_M", 
+        "AROON_DIFF_S", "PCO_10_20", "ADX_L"
+    };
+    
+    // Update feature columns (exclude tgt/TGT)
+    std::vector<std::string> newFeatureColumns;
+    for (const auto& name : columnNames) {
+        if (name.size() >= 3) {
+            std::string prefix = name.substr(0, 3);
+            std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
+            if (prefix != "tgt") {
+                newFeatureColumns.push_back(name);
+            }
+        } else {
+            newFeatureColumns.push_back(name);
+        }
+    }
+    
+    if (newFeatureColumns != m_availableFeatureColumns) {
+        m_availableFeatureColumns = newFeatureColumns;
+        m_selectedFeatures.resize(m_availableFeatureColumns.size(), false);
+        
+        // Create sorted features list
+        m_sortedFeatures.clear();
+        for (size_t i = 0; i < m_availableFeatureColumns.size(); ++i) {
+            const std::string& columnName = m_availableFeatureColumns[i];
+            bool isDefault = std::find(defaultFeatures.begin(), defaultFeatures.end(), columnName) != defaultFeatures.end();
+            m_sortedFeatures.push_back({columnName, isDefault});
+            m_selectedFeatures[i] = isDefault;
+        }
+        
+        // Sort alphabetically
+        std::sort(m_sortedFeatures.begin(), m_sortedFeatures.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
+    
+    // Update target columns (only tgt/TGT)
+    std::vector<std::string> newTargetColumns;
+    for (const auto& name : columnNames) {
+        if (name.size() >= 3) {
+            std::string prefix = name.substr(0, 3);
+            std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
+            if (prefix == "tgt") {
+                newTargetColumns.push_back(name);
+            }
+        }
+    }
+    
+    if (newTargetColumns != m_availableTargetColumns) {
+        m_availableTargetColumns = newTargetColumns;
+        m_selectedTargetIndex = -1;
+        
+        // Auto-select the first target column if available
+        if (!newTargetColumns.empty()) {
+            m_selectedTargetIndex = 0;
+        }
+    }
+}
+
+void SimulationWindow::StartSimulation() {
+    if (m_isRunning.load()) return;
+    
+    // Make sure any previous thread is properly cleaned up
+    if (m_simulationThread.joinable()) {
+        m_simulationThread.join();
+    }
+    
+    // Clear cached model when starting new simulation
+    m_cachedModel.is_valid = false;
+    m_cachedModel.model_buffer.clear();
+    
+    // Build configuration - use sorted features but get from original indices
+    m_config.feature_columns.clear();
+    for (const auto& [name, selected] : m_sortedFeatures) {
+        if (selected) {
+            m_config.feature_columns.push_back(name);
+        }
+    }
+    
+    if (m_selectedTargetIndex >= 0 && m_selectedTargetIndex < (int)m_availableTargetColumns.size()) {
+        m_config.target_column = m_availableTargetColumns[m_selectedTargetIndex];
+    }
+    
+    // Create a new simulation run with full configuration
+    {
+        std::lock_guard<std::mutex> lock(m_resultsMutex);
+        SimulationRun newRun;
+        newRun.name = GenerateRunName();
+        newRun.config_description = GenerateConfigDescription();
+        newRun.config = m_config;  // Store the full configuration
+        newRun.plotColor = GetRunColor(m_simulationRuns.size());
+        newRun.startTime = std::chrono::system_clock::now();
+        newRun.completed = false;
+        
+        m_simulationRuns.push_back(newRun);
+        m_currentRunIndex = m_simulationRuns.size() - 1;
+    }
+    
+    // Reset state
+    m_shouldStop.store(false);
+    m_currentFold.store(0);
+    
+    // Calculate total folds based on the configuration at start time
+    if (m_timeSeriesWindow && m_timeSeriesWindow->HasData()) {
+        const auto* df = m_timeSeriesWindow->GetDataFrame();
+        int64_t numRows = df->num_rows();
+        
+        // Use the configuration that was just captured in the SimulationRun
+        int maxFolds = CalculateMaxFolds(numRows, m_config);
+        int actualEndFold = (m_config.end_fold == -1) ? maxFolds : std::min(m_config.end_fold, maxFolds);
+        int numFolds = std::max(0, actualEndFold - m_config.start_fold + 1);
+        
+        m_totalFolds.store(numFolds);
+    }
+    
+    // Start simulation thread
+    m_isRunning.store(true);
+    m_simulationThread = std::thread(&SimulationWindow::RunSimulationThread, this);
+}
+
+void SimulationWindow::StopSimulation() {
+    if (!m_isRunning.load()) return;
+    
+    m_shouldStop.store(true);
+    if (m_simulationThread.joinable()) {
+        m_simulationThread.join();
+    }
+    m_isRunning.store(false);
+}
+
+void SimulationWindow::ResetSimulation() {
+    StopSimulation();
+    
+    // Wait a bit to ensure thread is fully stopped
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    
+    {
+        std::lock_guard<std::mutex> lock(m_resultsMutex);
+        m_simulationRuns.clear();
+        m_currentRunIndex = -1;
+        m_resultsUpdated = false;
+    }
+    
+    m_currentFold.store(0);
+    m_totalFolds.store(0);
+}
+
+void SimulationWindow::RunSimulationThread() {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        std::cerr << "No data available for simulation" << std::endl;
+        m_isRunning.store(false);
+        return;
+    }
+    
+    // Get the configuration from the current run (captured at start time)
+    {
+        std::lock_guard<std::mutex> lock(m_resultsMutex);
+        if (m_currentRunIndex >= 0 && m_currentRunIndex < (int)m_simulationRuns.size()) {
+            m_runningConfig = m_simulationRuns[m_currentRunIndex].config;
+        } else {
+            std::cerr << "Invalid run index" << std::endl;
+            m_isRunning.store(false);
+            return;
+        }
+    }
+    
+    std::cout << "Starting XGBoost simulation with " << m_runningConfig.feature_columns.size() 
+              << " features and target: " << m_runningConfig.target_column << std::endl;
+    std::cout << "Configuration: Train size=" << m_runningConfig.train_size 
+              << ", Test size=" << m_runningConfig.test_size
+              << ", Gap=" << m_runningConfig.train_test_gap
+              << ", Fold step=" << m_runningConfig.fold_step << std::endl;
+    
+    
+    float runningSum = 0.0f;
+    int totalFolds = m_totalFolds.load();
+    
+    // Calculate actual end fold
+    const auto* df = m_timeSeriesWindow->GetDataFrame();
+    int64_t numRows = df->num_rows();
+    int maxFolds = CalculateMaxFolds(numRows, m_runningConfig);
+    int actualEndFold = (m_runningConfig.end_fold == -1) ? maxFolds : std::min(m_runningConfig.end_fold, maxFolds);
+    
+    // Use configuration parameters instead of hardcoded values
+    for (int fold = m_runningConfig.start_fold; fold <= actualEndFold && !m_shouldStop.load(); ++fold) {
+        m_currentFold.store(fold - m_runningConfig.start_fold + 1);
+        
+        int train_start = m_runningConfig.initial_offset + (fold - m_runningConfig.start_fold) * m_runningConfig.fold_step;
+        int train_end = train_start + m_runningConfig.train_size;
+        int test_start = train_end + m_runningConfig.train_test_gap;
+        int test_end = test_start + m_runningConfig.test_size;
+        
+        try {
+            // Run actual XGBoost fold
+            FoldResult result = testSingleFold(train_start, train_end, test_start, test_end);
+            result.fold_number = fold;
+            
+            // Handle model caching/reuse if enabled
+            if (m_runningConfig.reuse_previous_model) {
+                if (result.model_learned_nothing && m_cachedModel.is_valid) {
+                    // Model didn't learn - reuse cached model for predictions
+                    std::cout << "Fold " << fold << " failed to learn - reusing model from fold " 
+                             << m_cachedModel.source_fold << std::endl;
+                    
+                    // Mark that we used cached model
+                    result.used_cached_model = true;
+                    
+                    // We need to re-run predictions with cached model
+                    // This will be handled inside the test functions
+                } else if (!result.model_learned_nothing) {
+                    // Model learned successfully - cache it for future use
+                    // This needs to be done inside the test functions where we have the booster
+                    std::cout << "Fold " << fold << " learned successfully - will cache if needed" << std::endl;
+                }
+            }
+            
+            // Update running sum (only if signals generated)
+            if (result.n_signals > 0) {
+                runningSum += result.signal_sum;
+                std::cout << "===> Running sum: " << std::fixed << std::setprecision(6) 
+                         << runningSum << " <====" << std::endl;
+                std::cout << "Sum of signals: " << result.signal_sum << std::endl;
+                std::cout << "Hit rate: " << std::fixed << std::setprecision(2) 
+                         << (result.hit_rate * 100) << "%" << std::endl;
+            } else {
+                std::cout << "No signals generated." << std::endl;
+            }
+            
+            result.running_sum = runningSum;
+            
+            // Add to results (check if we should stop before adding)
+            if (!m_shouldStop.load() && m_currentRunIndex >= 0) {
+                std::lock_guard<std::mutex> lock(m_resultsMutex);
+                if (m_currentRunIndex < (int)m_simulationRuns.size()) {
+                    auto& currentRun = m_simulationRuns[m_currentRunIndex];
+                    currentRun.foldResults.push_back(result);
+                    currentRun.profitPlotX.push_back(fold);
+                    currentRun.profitPlotY.push_back(runningSum);
+                    m_resultsUpdated = true;
+                }
+            }
+            
+            // Log timing variance diagnostic
+            static int fold_count = 0;
+            static double total_time = 0;
+            static int min_iter = 999999, max_iter = 0;
+            
+            fold_count++;
+            min_iter = std::min(min_iter, (int)result.best_iteration);
+            max_iter = std::max(max_iter, (int)result.best_iteration);
+            
+            if (fold_count % 50 == 0) {
+                std::cout << "=== After " << fold_count << " folds: Early stopping range: " 
+                         << min_iter << " to " << max_iter << " iterations ===" << std::endl;
+            }
+            
+            std::cout << std::string(50, '-') << std::endl;
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Error in fold " << fold << ": " << e.what() << std::endl;
+            // Continue with next fold
+        }
+    }
+    
+    // Mark current run as completed
+    if (m_currentRunIndex >= 0) {
+        std::lock_guard<std::mutex> lock(m_resultsMutex);
+        if (m_currentRunIndex < (int)m_simulationRuns.size()) {
+            m_simulationRuns[m_currentRunIndex].completed = true;
+        }
+    }
+    
+    
+    m_isRunning.store(false);
+    std::cout << "XGBoost simulation completed." << std::endl;
+}
+
+// XGBoost helper methods (from xg.txt)
+void SimulationWindow::checkXGBoostError(int status, const std::string& context) {
+    if (status != 0) {
+        const char* error = XGBGetLastError();
+        std::cerr << "XGBoost error in " << context << ": " << error << std::endl;
+        throw std::runtime_error("XGBoost error: " + std::string(error));
+    }
+}
+
+std::vector<float> SimulationWindow::extractColumnData(const std::string& columnName, int startRow, int endRow) {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        throw std::runtime_error("No data available");
+    }
+    
+    const chronosflow::AnalyticsDataFrame* dataFrame = m_timeSeriesWindow->GetDataFrame();
+    if (!dataFrame) {
+        throw std::runtime_error("DataFrame is null");
+    }
+    
+    // Get the Arrow table
+    auto table = dataFrame->get_cpu_table();
+    if (!table) {
+        throw std::runtime_error("Unable to get CPU table");
+    }
+    
+    // Find column index
+    auto columnNames = dataFrame->column_names();
+    int columnIndex = -1;
+    for (size_t i = 0; i < columnNames.size(); ++i) {
+        if (columnNames[i] == columnName) {
+            columnIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    
+    if (columnIndex == -1) {
+        throw std::runtime_error("Column '" + columnName + "' not found");
+    }
+    
+    // Get the column
+    auto column = table->column(columnIndex);
+    if (!column) {
+        throw std::runtime_error("Unable to get column '" + columnName + "'");
+    }
+    
+    // Clamp bounds
+    int64_t numRows = dataFrame->num_rows();
+    int actualStart = std::max(0, startRow);
+    int actualEnd = std::min((int)numRows, endRow);
+    
+    // Debug output
+    if (columnName.find("return") != std::string::npos || columnName.find("Return") != std::string::npos) {
+        std::cout << "extractColumnData: '" << columnName << "' rows [" << startRow << ", " << endRow 
+                  << "] -> actual [" << actualStart << ", " << actualEnd << "] (" 
+                  << (actualEnd - actualStart) << " rows)" << std::endl;
+    }
+    
+    std::vector<float> result;
+    result.reserve(actualEnd - actualStart);
+    
+    // Extract data from the column (same pattern as HistogramWindow)
+    bool debug_this_column = (columnName.find("return") != std::string::npos || 
+                             columnName.find("Return") != std::string::npos);
+    int non_zero_count = 0;
+    
+    for (int i = actualStart; i < actualEnd; ++i) {
+        auto scalar_result = column->GetScalar(i);
+        if (scalar_result.ok()) {
+            auto scalar = scalar_result.ValueOrDie();
+            if (scalar->is_valid) {
+                double value = 0.0;
+                if (scalar->type->id() == arrow::Type::DOUBLE) {
+                    value = std::static_pointer_cast<arrow::DoubleScalar>(scalar)->value;
+                }
+                else if (scalar->type->id() == arrow::Type::INT64) {
+                    value = static_cast<double>(std::static_pointer_cast<arrow::Int64Scalar>(scalar)->value);
+                }
+                else if (scalar->type->id() == arrow::Type::FLOAT) {
+                    value = static_cast<double>(std::static_pointer_cast<arrow::FloatScalar>(scalar)->value);
+                }
+                else {
+                    // Skip non-numeric columns, use 0.0
+                    if (debug_this_column && i == actualStart) {
+                        std::cout << "  Column type: " << scalar->type->ToString() << " (not numeric)" << std::endl;
+                    }
+                    value = 0.0;
+                }
+                
+                if (std::abs(value) > 1e-10) non_zero_count++;
+                result.push_back(static_cast<float>(value));
+            } else {
+                result.push_back(0.0f); // Handle null values
+            }
+        } else {
+            result.push_back(0.0f); // Handle error cases
+        }
+    }
+    
+    if (debug_this_column) {
+        std::cout << "  Extracted " << result.size() << " values, " 
+                  << non_zero_count << " non-zero" << std::endl;
+        if (result.size() > 0) {
+            std::cout << "  First few values: ";
+            for (size_t j = 0; j < std::min((size_t)5, result.size()); ++j) {
+                std::cout << result[j] << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+    return result;
+}
+
+float SimulationWindow::calculateMedian(std::vector<float>& values) {
+    if (values.empty()) return 0.0f;
+    
+    std::sort(values.begin(), values.end());
+    size_t n = values.size();
+    
+    if (n % 2 == 0) {
+        return (values[n / 2 - 1] + values[n / 2]) / 2.0f;
+    } else {
+        return values[n / 2];
+    }
+}
+
+float SimulationWindow::calculateStdDev(const std::vector<float>& values, float mean) {
+    if (values.size() <= 1) return 0.0f;
+    
+    float sum_sq_diff = 0.0f;
+    for (float val : values) {
+        float diff = val - mean;
+        sum_sq_diff += diff * diff;
+    }
+    return std::sqrt(sum_sq_diff / (values.size() - 1));
+}
+
+float SimulationWindow::calculateQuantile(std::vector<float> values, float quantile) {
+    if (values.empty()) return 0.0f;
+    
+    std::sort(values.begin(), values.end());
+    int index = static_cast<int>(quantile * (values.size() - 1));
+    return values[index];
+}
+
+// Multi-run helper methods
+std::string SimulationWindow::GenerateRunName() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto tm = *std::localtime(&time_t);
+    
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "Run %d (%02d:%02d:%02d)", 
+             (int)m_simulationRuns.size() + 1, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    
+    return std::string(buffer);
+}
+
+std::string SimulationWindow::GenerateConfigDescription() {
+    std::string desc;
+    
+    // Add feature count
+    int featureCount = std::count(m_selectedFeatures.begin(), m_selectedFeatures.end(), true);
+    desc += std::to_string(featureCount) + " features";
+    
+    // Add target
+    if (m_selectedTargetIndex >= 0 && m_selectedTargetIndex < (int)m_availableTargetColumns.size()) {
+        desc += ", Target: " + m_availableTargetColumns[m_selectedTargetIndex];
+    }
+    
+    // Add key hyperparameters
+    char hyperparams[256];
+    snprintf(hyperparams, sizeof(hyperparams), 
+             "\nLR:%.3f, Depth:%d, MCW:%.1f, SS:%.2f, CST:%.2f, L2:%.1f\nRounds:%d, ES:%d, ValSplit:%.2f", 
+             m_config.learning_rate, m_config.max_depth, m_config.min_child_weight,
+             m_config.subsample, m_config.colsample_bytree, m_config.lambda,
+             m_config.num_boost_round, m_config.early_stopping_rounds, m_config.val_split_ratio);
+    desc += hyperparams;
+    
+    return desc;
+}
+
+ImVec4 SimulationWindow::GetRunColor(int runIndex) {
+    // Generate different colors for each run
+    static const ImVec4 colors[] = {
+        ImVec4(0.2f, 0.7f, 0.9f, 1.0f), // Blue
+        ImVec4(0.9f, 0.4f, 0.2f, 1.0f), // Red-Orange
+        ImVec4(0.3f, 0.8f, 0.3f, 1.0f), // Green
+        ImVec4(0.9f, 0.7f, 0.2f, 1.0f), // Yellow
+        ImVec4(0.7f, 0.3f, 0.9f, 1.0f), // Purple
+        ImVec4(0.2f, 0.9f, 0.7f, 1.0f), // Cyan
+        ImVec4(0.9f, 0.5f, 0.7f, 1.0f), // Pink
+        ImVec4(0.5f, 0.5f, 0.5f, 1.0f)  // Gray
+    };
+    
+    return colors[runIndex % (sizeof(colors) / sizeof(colors[0]))];
+}
+
+void SimulationWindow::CacheModel(BoosterHandle booster, const TransformParams& params,
+                                 float pred_thresh_scaled, float pred_thresh_orig,
+                                 float dyn_pos_thresh, int fold_number) {
+    // Serialize the model to a buffer
+    bst_ulong out_len;
+    const char* out_dptr;
+    
+    // Use "json" format for serialization (or "ubj" for binary)
+    const char* config = R"({"format": "ubj"})";  // Using Universal Binary JSON for efficiency
+    int status = XGBoosterSaveModelToBuffer(booster, config, &out_len, &out_dptr);
+    if (status != 0) {
+        std::cerr << "Failed to serialize model for caching: " << XGBGetLastError() << std::endl;
+        return;
+    }
+    
+    // Store the model and its parameters
+    m_cachedModel.model_buffer.assign(out_dptr, out_dptr + out_len);
+    m_cachedModel.transform_params = params;
+    m_cachedModel.prediction_threshold_scaled = pred_thresh_scaled;
+    m_cachedModel.prediction_threshold_original = pred_thresh_orig;
+    m_cachedModel.dynamic_positive_threshold = dyn_pos_thresh;
+    m_cachedModel.source_fold = fold_number;
+    m_cachedModel.is_valid = true;
+    
+    std::cout << "Cached model from fold " << fold_number << " for reuse" << std::endl;
+}
+
+BoosterHandle SimulationWindow::LoadCachedModel() {
+    if (!m_cachedModel.is_valid || m_cachedModel.model_buffer.empty()) {
+        return nullptr;
+    }
+    
+    BoosterHandle booster;
+    int status = XGBoosterCreate(nullptr, 0, &booster);
+    if (status != 0) {
+        std::cerr << "Failed to create booster for cached model: " << XGBGetLastError() << std::endl;
+        return nullptr;
+    }
+    
+    status = XGBoosterLoadModelFromBuffer(booster, m_cachedModel.model_buffer.data(), 
+                                         m_cachedModel.model_buffer.size());
+    if (status != 0) {
+        std::cerr << "Failed to load cached model: " << XGBGetLastError() << std::endl;
+        XGBoosterFree(booster);
+        return nullptr;
+    }
+    
+    std::cout << "Loaded cached model from fold " << m_cachedModel.source_fold << std::endl;
+    return booster;
+}
+
+void SimulationWindow::RunTestModel() {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        std::cerr << "No data available for testing" << std::endl;
+        return;
+    }
+    
+    // Clean up previous model if exists
+    if (m_testModelState.trained_model) {
+        XGBoosterFree(m_testModelState.trained_model);
+        m_testModelState.trained_model = nullptr;
+    }
+    
+    try {
+        // Build configuration from current GUI selections
+        SimulationConfig testConfig;
+        
+        // Copy ALL hyperparameters from m_config (including val_split_ratio!)
+        testConfig.learning_rate = m_config.learning_rate;
+        testConfig.max_depth = m_config.max_depth;
+        testConfig.min_child_weight = m_config.min_child_weight;
+        testConfig.subsample = m_config.subsample;
+        testConfig.colsample_bytree = m_config.colsample_bytree;
+        testConfig.lambda = m_config.lambda;
+        testConfig.num_boost_round = m_config.num_boost_round;
+        testConfig.early_stopping_rounds = m_config.early_stopping_rounds;
+        testConfig.min_boost_rounds = m_config.min_boost_rounds;
+        testConfig.use_standardization = m_config.use_standardization;
+        testConfig.use_tanh_transform = m_config.use_tanh_transform;
+        testConfig.tanh_scaling_factor = m_config.tanh_scaling_factor;
+        testConfig.val_split_ratio = m_config.val_split_ratio;  // THIS WAS MISSING!
+        
+        // IMPORTANT: Use the exact feature order from m_config, not reconstruct from GUI
+        // The order matters for XGBoost!
+        testConfig.feature_columns = m_config.feature_columns;
+        testConfig.target_column = m_config.target_column;
+        
+        // Validate we have features and target
+        if (testConfig.feature_columns.empty()) {
+            // Fallback to GUI selection if no config
+            for (size_t i = 0; i < m_selectedFeatures.size(); ++i) {
+                if (m_selectedFeatures[i] && i < m_availableFeatureColumns.size()) {
+                    testConfig.feature_columns.push_back(m_availableFeatureColumns[i]);
+                }
+            }
+        }
+        
+        if (testConfig.target_column.empty()) {
+            // Fallback to GUI selection if no config
+            if (m_selectedTargetIndex >= 0 && m_selectedTargetIndex < (int)m_availableTargetColumns.size()) {
+                testConfig.target_column = m_availableTargetColumns[m_selectedTargetIndex];
+            } else {
+                std::cerr << "No target column selected" << std::endl;
+                return;
+            }
+        }
+        
+        std::cout << "Running test model with " << testConfig.feature_columns.size() 
+                  << " features and target: " << testConfig.target_column << std::endl;
+        std::cout << "Feature order: ";
+        for (const auto& feat : testConfig.feature_columns) {
+            std::cout << feat << " ";
+        }
+        std::cout << std::endl;
+        std::cout << "Data ranges - Train: " << m_testModelState.train_start_row 
+                  << " to " << m_testModelState.train_end_row 
+                  << ", Test: " << m_testModelState.test_start_row 
+                  << " to " << m_testModelState.test_end_row << std::endl;
+        
+        // Use the validation split ratio from testConfig (which was copied from m_config)
+        std::cout << "Using validation split ratio: " << testConfig.val_split_ratio << std::endl;
+        std::cout << "Hyperparameters: lr=" << testConfig.learning_rate 
+                  << ", depth=" << testConfig.max_depth
+                  << ", min_child=" << testConfig.min_child_weight
+                  << ", subsample=" << testConfig.subsample
+                  << ", colsample=" << testConfig.colsample_bytree
+                  << ", lambda=" << testConfig.lambda
+                  << ", rounds=" << testConfig.num_boost_round
+                  << ", early_stop=" << testConfig.early_stopping_rounds << std::endl;
+        
+        // Split training data for validation
+        // Check data availability first
+        const auto* df = m_timeSeriesWindow->GetDataFrame();
+        if (!df) {
+            std::cerr << "ERROR: DataFrame is null" << std::endl;
+            return;
+        }
+        int64_t numRows = df->num_rows();
+        std::cout << "DataFrame has " << numRows << " rows total" << std::endl;
+        std::cout << "Requested train range: " << m_testModelState.train_start_row << " to " << m_testModelState.train_end_row << std::endl;
+        std::cout << "Requested test range: " << m_testModelState.test_start_row << " to " << m_testModelState.test_end_row << std::endl;
+        
+        // Validate ranges
+        if (m_testModelState.train_start_row < 0 || m_testModelState.test_end_row > numRows) {
+            std::cerr << "ERROR: Row ranges out of bounds. DataFrame has " << numRows 
+                      << " rows, requested range [" << m_testModelState.train_start_row 
+                      << ", " << m_testModelState.test_end_row << "]" << std::endl;
+            // Adjust to valid range
+            if (m_testModelState.test_end_row > numRows) {
+                int excess = m_testModelState.test_end_row - numRows;
+                m_testModelState.train_start_row = std::max(0, m_testModelState.train_start_row - excess);
+                m_testModelState.train_end_row -= excess;
+                m_testModelState.test_start_row -= excess;
+                m_testModelState.test_end_row = numRows;
+                std::cout << "Adjusted to valid range: train [" << m_testModelState.train_start_row 
+                          << ", " << m_testModelState.train_end_row << "], test [" 
+                          << m_testModelState.test_start_row << ", " << m_testModelState.test_end_row << "]" << std::endl;
+            }
+        }
+        
+        int train_size = m_testModelState.train_end_row - m_testModelState.train_start_row;
+        int split_point = m_testModelState.train_start_row + 
+                         (int)(train_size * testConfig.val_split_ratio);
+        std::cout << "Train range: [" << m_testModelState.train_start_row << ", " 
+                  << m_testModelState.train_end_row << "] = " << train_size << " rows" << std::endl;
+        std::cout << "Split at: " << split_point << " (train: " << (split_point - m_testModelState.train_start_row)
+                  << ", val: " << (m_testModelState.train_end_row - split_point) << ")" << std::endl;
+        
+        // Extract features and target for training
+        std::vector<float> X_train_flat, y_train;
+        int n_train_samples = split_point - m_testModelState.train_start_row;
+        X_train_flat.resize(n_train_samples * testConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < testConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = testConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, m_testModelState.train_start_row, split_point);
+            if (columnData.empty()) {
+                std::cerr << "WARNING: No data extracted for feature " << feature 
+                          << " (rows " << m_testModelState.train_start_row << " to " << split_point << ")" << std::endl;
+            } else if (columnData.size() != (size_t)n_train_samples) {
+                std::cerr << "WARNING: Feature " << feature << " has " << columnData.size() 
+                          << " samples, expected " << n_train_samples << std::endl;
+            }
+            
+            // Copy data in correct position (row-major format)
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_train_flat[i * testConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_train = extractColumnData(testConfig.target_column, m_testModelState.train_start_row, split_point);
+        
+        // Debug: Check if data was loaded
+        std::cout << "Training data loaded: " << y_train.size() << " samples" << std::endl;
+        std::cout << "Target column: '" << testConfig.target_column << "'" << std::endl;
+        if (y_train.size() > 0) {
+            float min_val = *std::min_element(y_train.begin(), y_train.end());
+            float max_val = *std::max_element(y_train.begin(), y_train.end());
+            std::cout << "Target range: [" << min_val << ", " << max_val << "]" << std::endl;
+            
+            // Check first few values
+            std::cout << "First 5 target values: ";
+            for (size_t i = 0; i < std::min((size_t)5, y_train.size()); ++i) {
+                std::cout << y_train[i] << " ";
+            }
+            std::cout << std::endl;
+            
+            // Check if all zeros
+            bool all_zeros = true;
+            for (float v : y_train) {
+                if (std::abs(v) > 1e-10) {
+                    all_zeros = false;
+                    break;
+                }
+            }
+            if (all_zeros) {
+                std::cerr << "WARNING: All training target values are zero!" << std::endl;
+            }
+        }
+        
+        // Extract validation data
+        std::vector<float> X_val_flat, y_val;
+        int n_val_samples = m_testModelState.train_end_row - split_point;
+        X_val_flat.resize(n_val_samples * testConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < testConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = testConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, split_point, m_testModelState.train_end_row);
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_val_flat[i * testConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_val = extractColumnData(testConfig.target_column, split_point, m_testModelState.train_end_row);
+        
+        // Extract test data  
+        std::vector<float> X_test_flat, y_test;
+        int n_test_samples = m_testModelState.test_end_row - m_testModelState.test_start_row;
+        X_test_flat.resize(n_test_samples * testConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < testConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = testConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, m_testModelState.test_start_row, 
+                                               m_testModelState.test_end_row);
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_test_flat[i * testConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_test = extractColumnData(testConfig.target_column, m_testModelState.test_start_row, 
+                                  m_testModelState.test_end_row);
+        
+        // Store original actuals for plotting
+        m_testModelState.test_actuals = y_test;
+        
+        // Apply transformation based on configuration
+        std::vector<float> y_train_scaled, y_val_scaled, y_test_scaled;
+        
+        if (testConfig.use_tanh_transform || testConfig.use_standardization) {
+            // Only calculate transformation parameters if not manually set (e.g., when examining a fold)
+            if (!m_testModelState.transform_params_manually_set) {
+                // Calculate transformation parameters from training data only
+                float sum = std::accumulate(y_train.begin(), y_train.end(), 0.0f);
+                m_testModelState.transform_params.mean = sum / y_train.size();
+                
+                float sq_sum = 0.0f;
+                for (float val : y_train) {
+                    float diff = val - m_testModelState.transform_params.mean;
+                    sq_sum += diff * diff;
+                }
+                m_testModelState.transform_params.std_dev = std::sqrt(sq_sum / y_train.size());
+                if (m_testModelState.transform_params.std_dev == 0.0f) {
+                    m_testModelState.transform_params.std_dev = 1.0f;
+                }
+                m_testModelState.transform_params.scaling_factor = testConfig.tanh_scaling_factor;
+                
+                std::cout << std::fixed << std::setprecision(6) 
+                          << "Calculated transformation params: mean=" << m_testModelState.transform_params.mean 
+                          << ", std=" << m_testModelState.transform_params.std_dev 
+                          << ", scale=" << m_testModelState.transform_params.scaling_factor 
+                          << std::resetiosflags(std::ios::fixed) << std::endl;
+            } else {
+                std::cout << std::fixed << std::setprecision(6) 
+                          << "Using preserved transformation params from fold: mean=" << m_testModelState.transform_params.mean 
+                          << ", std=" << m_testModelState.transform_params.std_dev 
+                          << ", scale=" << m_testModelState.transform_params.scaling_factor 
+                          << std::resetiosflags(std::ios::fixed) << std::endl;
+            }
+            
+            // Apply transformation
+            if (testConfig.use_tanh_transform) {
+                for (float val : y_train) {
+                    float standardized = (val - m_testModelState.transform_params.mean) / 
+                                       m_testModelState.transform_params.std_dev;
+                    float scaled = standardized * testConfig.tanh_scaling_factor;
+                    y_train_scaled.push_back(std::tanh(scaled));
+                }
+                for (float val : y_val) {
+                    float standardized = (val - m_testModelState.transform_params.mean) / 
+                                       m_testModelState.transform_params.std_dev;
+                    float scaled = standardized * testConfig.tanh_scaling_factor;
+                    y_val_scaled.push_back(std::tanh(scaled));
+                }
+                for (float val : y_test) {
+                    float standardized = (val - m_testModelState.transform_params.mean) / 
+                                       m_testModelState.transform_params.std_dev;
+                    float scaled = standardized * testConfig.tanh_scaling_factor;
+                    y_test_scaled.push_back(std::tanh(scaled));
+                }
+            } else {
+                // Just standardization
+                for (float val : y_train) {
+                    y_train_scaled.push_back((val - m_testModelState.transform_params.mean) / 
+                                            m_testModelState.transform_params.std_dev);
+                }
+                for (float val : y_val) {
+                    y_val_scaled.push_back((val - m_testModelState.transform_params.mean) / 
+                                          m_testModelState.transform_params.std_dev);
+                }
+                for (float val : y_test) {
+                    y_test_scaled.push_back((val - m_testModelState.transform_params.mean) / 
+                                           m_testModelState.transform_params.std_dev);
+                }
+            }
+        } else {
+            // No transformation
+            y_train_scaled = y_train;
+            y_val_scaled = y_val;
+            y_test_scaled = y_test;
+            m_testModelState.transform_params.mean = 0.0f;
+            m_testModelState.transform_params.std_dev = 1.0f;
+            m_testModelState.transform_params.scaling_factor = 1.0f;
+        }
+        
+        // Create XGBoost DMatrices
+        DMatrixHandle dtrain, dval, dtest;
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_train_flat.data(), y_train.size(), 
+                                 testConfig.feature_columns.size(), -1, &dtrain),
+            "Creating training matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dtrain, "label", y_train_scaled.data(), y_train_scaled.size()),
+            "Setting training labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_val_flat.data(), y_val.size(), 
+                                 testConfig.feature_columns.size(), -1, &dval),
+            "Creating validation matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dval, "label", y_val_scaled.data(), y_val_scaled.size()),
+            "Setting validation labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_test_flat.data(), y_test.size(), 
+                                 testConfig.feature_columns.size(), -1, &dtest),
+            "Creating test matrix"
+        );
+        
+        // Create and configure booster
+        DMatrixHandle eval_dmats[2] = {dtrain, dval};
+        const char* eval_names[2] = {"train", "val"};
+        
+        checkXGBoostError(
+            XGBoosterCreate(eval_dmats, 2, &m_testModelState.trained_model),
+            "Creating booster"
+        );
+        
+        // Set parameters - use same parameters as main simulation
+        BoosterHandle booster = m_testModelState.trained_model;
+        checkXGBoostError(XGBoosterSetParam(booster, "learning_rate", 
+                                           std::to_string(testConfig.learning_rate).c_str()), "Setting learning_rate");
+        checkXGBoostError(XGBoosterSetParam(booster, "max_depth", 
+                                           std::to_string(testConfig.max_depth).c_str()), "Setting max_depth");
+        checkXGBoostError(XGBoosterSetParam(booster, "min_child_weight", 
+                                           std::to_string(testConfig.min_child_weight).c_str()), "Setting min_child_weight");
+        checkXGBoostError(XGBoosterSetParam(booster, "subsample", 
+                                           std::to_string(testConfig.subsample).c_str()), "Setting subsample");
+        checkXGBoostError(XGBoosterSetParam(booster, "colsample_bytree", 
+                                           std::to_string(testConfig.colsample_bytree).c_str()), "Setting colsample_bytree");
+        checkXGBoostError(XGBoosterSetParam(booster, "lambda", 
+                                           std::to_string(testConfig.lambda).c_str()), "Setting lambda");
+        checkXGBoostError(XGBoosterSetParam(booster, "objective", "reg:squarederror"), "Setting objective");
+        checkXGBoostError(XGBoosterSetParam(booster, "tree_method", "hist"), "Setting tree_method");
+        checkXGBoostError(XGBoosterSetParam(booster, "seed", "43"), "Setting seed");
+        
+        // Try GPU first, fallback to CPU
+        int gpu_result = XGBoosterSetParam(booster, "device", "cuda");
+        if (gpu_result != 0) {
+            checkXGBoostError(XGBoosterSetParam(booster, "device", "cpu"), "Setting device to CPU");
+        }
+        
+        // Train the model with early stopping
+        float best_score = std::numeric_limits<float>::max();
+        int best_iteration = 0;
+        int rounds_without_improvement = 0;
+        bool ever_improved = false;
+        float initial_score = std::numeric_limits<float>::max();
+        int effective_min_boost_rounds = testConfig.min_boost_rounds;
+        
+        std::cout << "Training test model..." << std::endl;
+        for (int iter = 0; iter < testConfig.num_boost_round; ++iter) {
+            checkXGBoostError(
+                XGBoosterUpdateOneIter(booster, iter, dtrain),
+                "Training iteration"
+            );
+            
+            // Evaluate on validation set
+            const char* eval_result;
+            checkXGBoostError(
+                XGBoosterEvalOneIter(booster, iter, eval_dmats, eval_names, 2, &eval_result),
+                "Evaluation iteration"
+            );
+            
+            // Parse validation score
+            std::string eval_str(eval_result);
+            size_t val_pos = eval_str.find("val-rmse:");
+            if (val_pos != std::string::npos) {
+                float val_score = std::stof(eval_str.substr(val_pos + 9));
+                
+                // Store initial score
+                if (iter == 0) {
+                    initial_score = val_score;
+                }
+                
+                if (val_score < best_score) {
+                    best_score = val_score;
+                    best_iteration = iter;
+                    rounds_without_improvement = 0;
+                    ever_improved = true;
+                } else {
+                    rounds_without_improvement++;
+                }
+                
+                // Check if model is not learning at iteration 0
+                if (iter == 0 && !ever_improved) {
+                    // Force minimum 50 iterations if no initial improvement (matching simulation logic)
+                    effective_min_boost_rounds = std::max(50, effective_min_boost_rounds);
+                    std::cout << "  No initial improvement - forcing minimum " 
+                              << effective_min_boost_rounds << " iterations" << std::endl;
+                }
+                
+                // Early stopping (but respect minimum rounds)
+                if (iter >= effective_min_boost_rounds && 
+                    rounds_without_improvement >= testConfig.early_stopping_rounds) {
+                    std::cout << "Early stopping at iteration " << iter 
+                              << " (best: " << best_iteration << ")" << std::endl;
+                    break;
+                }
+            }
+            
+            // Print progress every 20 iterations
+            if (iter % 20 == 0) {
+                std::cout << "Iteration " << iter << ", best score: " << best_score << std::endl;
+            }
+        }
+        
+        std::cout << "Training complete. Best iteration: " << best_iteration 
+                  << ", Best score: " << best_score << std::endl;
+        
+        // Make predictions on test set
+        bst_ulong test_len;
+        const float* predictions;
+        checkXGBoostError(
+            XGBoosterPredict(booster, dtest, 0, 0, 0, &test_len, &predictions),
+            "Predicting test set"
+        );
+        
+        // Store raw predictions for debugging
+        std::cout << "Raw predictions (first 5): ";
+        for (bst_ulong i = 0; i < std::min((bst_ulong)5, test_len); ++i) {
+            std::cout << std::fixed << std::setprecision(6) << predictions[i] << " ";
+        }
+        std::cout << std::resetiosflags(std::ios::fixed) << std::endl;
+        
+        // Inverse transform predictions back to original scale for display
+        m_testModelState.test_predictions.clear();
+        m_testModelState.test_predictions.reserve(test_len);
+        
+        if (testConfig.use_tanh_transform) {
+            std::cout << std::fixed << std::setprecision(6)
+                      << "Inverse transforming with tanh (mean=" << m_testModelState.transform_params.mean 
+                      << ", std=" << m_testModelState.transform_params.std_dev 
+                      << ", scale=" << m_testModelState.transform_params.scaling_factor << ")" 
+                      << std::resetiosflags(std::ios::fixed) << std::endl;
+            for (bst_ulong i = 0; i < test_len; ++i) {
+                float scaled_pred = predictions[i];
+                float clamped = std::max(-0.9999f, std::min(0.9999f, scaled_pred));
+                float atanh_val = 0.5f * std::log((1.0f + clamped) / (1.0f - clamped));
+                float original = (atanh_val / m_testModelState.transform_params.scaling_factor) * 
+                               m_testModelState.transform_params.std_dev + 
+                               m_testModelState.transform_params.mean;
+                m_testModelState.test_predictions.push_back(original);
+            }
+        } else if (testConfig.use_standardization) {
+            std::cout << "Inverse transforming with standardization (mean=" << m_testModelState.transform_params.mean 
+                      << ", std=" << m_testModelState.transform_params.std_dev << ")" << std::endl;
+            for (bst_ulong i = 0; i < test_len; ++i) {
+                float original = predictions[i] * m_testModelState.transform_params.std_dev + 
+                               m_testModelState.transform_params.mean;
+                m_testModelState.test_predictions.push_back(original);
+            }
+        } else {
+            std::cout << "No transformation applied" << std::endl;
+            m_testModelState.test_predictions.assign(predictions, predictions + test_len);
+        }
+        
+        // Debug transformed predictions
+        std::cout << "Transformed predictions (first 5): ";
+        for (size_t i = 0; i < std::min((size_t)5, m_testModelState.test_predictions.size()); ++i) {
+            std::cout << std::fixed << std::setprecision(6) << m_testModelState.test_predictions[i] << " ";
+        }
+        std::cout << std::resetiosflags(std::ios::fixed) << std::endl;
+        
+        std::cout << "Test actuals (first 5): ";
+        for (size_t i = 0; i < std::min((size_t)5, m_testModelState.test_actuals.size()); ++i) {
+            std::cout << std::fixed << std::setprecision(6) << m_testModelState.test_actuals[i] << " ";
+        }
+        std::cout << std::resetiosflags(std::ios::fixed) << std::endl;
+        
+        // Only calculate threshold if not manually set (e.g., when examining a fold)
+        // When examining a fold, threshold_manually_set is true and we preserve the exact fold threshold
+        if (!m_testModelState.threshold_manually_set) {
+            // Calculate threshold automatically
+            // Use 95th percentile of predictions on validation set
+            bst_ulong val_len;
+            const float* val_predictions;
+            checkXGBoostError(
+                XGBoosterPredict(booster, dval, 0, 0, 0, &val_len, &val_predictions),
+                "Predicting validation set"
+            );
+            
+            // Calculate threshold in transformed space first
+            std::vector<float> val_preds_scaled(val_predictions, val_predictions + val_len);
+            float threshold_scaled = calculateQuantile(val_preds_scaled, 0.95f);
+            
+            // Inverse transform threshold to original scale
+            if (testConfig.use_tanh_transform) {
+                float clamped = std::max(-0.9999f, std::min(0.9999f, threshold_scaled));
+                float atanh_val = 0.5f * std::log((1.0f + clamped) / (1.0f - clamped));
+                m_testModelState.trading_threshold = (atanh_val / m_testModelState.transform_params.scaling_factor) * 
+                                                    m_testModelState.transform_params.std_dev + 
+                                                    m_testModelState.transform_params.mean;
+            } else if (testConfig.use_standardization) {
+                m_testModelState.trading_threshold = threshold_scaled * m_testModelState.transform_params.std_dev + 
+                                                    m_testModelState.transform_params.mean;
+            } else {
+                m_testModelState.trading_threshold = threshold_scaled;
+            }
+            
+            std::cout << "Calculated trading threshold: " << m_testModelState.trading_threshold << std::endl;
+        } else {
+            std::cout << "Using preserved fold threshold: " << m_testModelState.trading_threshold 
+                      << " (from walkforward simulation)" << std::endl;
+        }
+        
+        // Calculate accuracy metrics
+        m_testModelState.signals_generated = 0;
+        int correct_signals = 0;
+        
+        for (size_t i = 0; i < m_testModelState.test_predictions.size(); ++i) {
+            if (m_testModelState.test_predictions[i] > m_testModelState.trading_threshold) {
+                m_testModelState.signals_generated++;
+                if (m_testModelState.test_actuals[i] > 0) {
+                    correct_signals++;
+                }
+            }
+        }
+        
+        if (m_testModelState.signals_generated > 0) {
+            m_testModelState.hit_rate = (float)correct_signals / m_testModelState.signals_generated;
+            m_testModelState.accuracy_above_threshold = m_testModelState.hit_rate;
+        } else {
+            m_testModelState.hit_rate = 0.0f;
+            m_testModelState.accuracy_above_threshold = 0.0f;
+        }
+        
+        // Get real feature importance from XGBoost
+        m_testModelState.feature_importance.clear();
+        
+        // Get feature scores using XGBoost C API
+        bst_ulong n_features;
+        char const** feature_names;
+        bst_ulong out_dim;
+        bst_ulong const* out_shape;
+        float const* scores;
+        
+        // Configure importance type - "weight" counts how many times a feature is used
+        // Can also be "gain" (average gain) or "cover" (average coverage)
+        const char* config = R"({"importance_type": "weight"})";
+        
+        // Get feature scores
+        if (XGBoosterFeatureScore(booster, config, &n_features, &feature_names, 
+                                 &out_dim, &out_shape, &scores) == 0) {
+            // Map feature names to scores
+            std::map<std::string, float> feature_score_map;
+            float max_score = 0.0f;
+            
+            for (bst_ulong i = 0; i < n_features; ++i) {
+                std::string feature_name(feature_names[i]);
+                float score = scores[i];
+                
+                // Feature names from XGBoost are like "f0", "f1", etc.
+                if (feature_name.substr(0, 1) == "f") {
+                    try {
+                        int feature_idx = std::stoi(feature_name.substr(1));
+                        if (feature_idx >= 0 && feature_idx < (int)testConfig.feature_columns.size()) {
+                            std::string actual_name = testConfig.feature_columns[feature_idx];
+                            feature_score_map[actual_name] = score;
+                            max_score = std::max(max_score, score);
+                        }
+                    } catch (...) {
+                        // If parsing fails, use the name as-is
+                        feature_score_map[feature_name] = score;
+                        max_score = std::max(max_score, score);
+                    }
+                } else {
+                    // Use the name directly if it's not in "f#" format
+                    feature_score_map[feature_name] = score;
+                    max_score = std::max(max_score, score);
+                }
+            }
+            
+            // Convert to feature importance pairs and normalize
+            if (max_score > 0) {
+                for (const auto& pair : feature_score_map) {
+                    m_testModelState.feature_importance.push_back(
+                        {pair.first, pair.second / max_score}
+                    );
+                }
+            }
+            
+            // Sort by importance (descending)
+            std::sort(m_testModelState.feature_importance.begin(), 
+                     m_testModelState.feature_importance.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+        }
+        
+        // Fallback to uniform importance if extraction failed
+        if (m_testModelState.feature_importance.empty()) {
+            for (size_t i = 0; i < testConfig.feature_columns.size(); ++i) {
+                m_testModelState.feature_importance.push_back(
+                    {testConfig.feature_columns[i], 1.0f / (i + 1)}
+                );
+            }
+        }
+        
+        // Clean up matrices
+        XGDMatrixFree(dtrain);
+        XGDMatrixFree(dval);
+        XGDMatrixFree(dtest);
+        
+        m_testModelState.model_trained = true;
+        
+        std::cout << "Test model trained successfully!" << std::endl;
+        std::cout << std::fixed << std::setprecision(6) 
+                  << "Threshold: " << m_testModelState.trading_threshold 
+                  << std::resetiosflags(std::ios::fixed) << std::endl;
+        std::cout << "Signals: " << m_testModelState.signals_generated << std::endl;
+        std::cout << "Hit Rate: " << std::fixed << std::setprecision(2)
+                  << (m_testModelState.hit_rate * 100.0f) << "%" 
+                  << std::resetiosflags(std::ios::fixed) << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error training test model: " << e.what() << std::endl;
+    }
+}
+
+void SimulationWindow::PlotFeatureImportance() {
+    if (m_testModelState.feature_importance.empty()) {
+        ImGui::Text("No feature importance data available");
+        return;
+    }
+    
+    // Prepare data for histogram
+    std::vector<const char*> labels;
+    std::vector<float> values;
+    
+    // Take top 10 features for display
+    int num_features = std::min(10, (int)m_testModelState.feature_importance.size());
+    for (int i = 0; i < num_features; ++i) {
+        labels.push_back(m_testModelState.feature_importance[i].first.c_str());
+        values.push_back(m_testModelState.feature_importance[i].second);
+    }
+    
+    if (ImPlot::BeginPlot("##FeatureImportancePlot", ImVec2(-1, 300))) {
+        ImPlot::SetupAxis(ImAxis_X1, nullptr, ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxis(ImAxis_Y1, "Importance Score", ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxisTicks(ImAxis_X1, 0, num_features - 1, num_features, labels.data());
+        
+        ImPlot::PlotBars("##ImportanceBars", values.data(), num_features);
+        
+        ImPlot::EndPlot();
+    }
+}
+
+void SimulationWindow::PlotPredictionScatter() {
+    if (m_testModelState.test_predictions.empty() || m_testModelState.test_actuals.empty()) {
+        ImGui::Text("No prediction data available");
+        return;
+    }
+    
+    // Debug info
+    ImGui::Text("Data points: %zu, Threshold: %.6f", 
+                m_testModelState.test_predictions.size(), 
+                m_testModelState.trading_threshold);
+    
+    // Check data validity
+    size_t min_size = std::min(m_testModelState.test_predictions.size(), 
+                               m_testModelState.test_actuals.size());
+    if (min_size == 0) {
+        ImGui::Text("No valid data points to plot");
+        return;
+    }
+    
+    // Create copies of data to ensure they're valid
+    std::vector<double> pred_data(min_size);
+    std::vector<double> actual_data(min_size);
+    for (size_t i = 0; i < min_size; ++i) {
+        pred_data[i] = static_cast<double>(m_testModelState.test_predictions[i]);
+        actual_data[i] = static_cast<double>(m_testModelState.test_actuals[i]);
+    }
+    
+    if (ImPlot::BeginPlot("##PredictionsVsActualsPlot", ImVec2(-1, 400), 
+                          ImPlotFlags_Equal)) {
+        // Set up axes with explicit ranges if AutoFit fails
+        double x_min = *std::min_element(pred_data.begin(), pred_data.end());
+        double x_max = *std::max_element(pred_data.begin(), pred_data.end());
+        double y_min = *std::min_element(actual_data.begin(), actual_data.end());
+        double y_max = *std::max_element(actual_data.begin(), actual_data.end());
+        
+        // Include threshold in x range if it exists
+        if (m_testModelState.trading_threshold != 0) {
+            x_min = std::min(x_min, (double)m_testModelState.trading_threshold);
+            x_max = std::max(x_max, (double)m_testModelState.trading_threshold);
+        }
+        
+        // Add some padding (15% on each side)
+        double x_padding = (x_max - x_min) * 0.15;
+        double y_padding = (y_max - y_min) * 0.15;
+        
+        if (x_padding == 0) x_padding = std::abs(x_max) * 0.1 + 0.001;
+        if (y_padding == 0) y_padding = std::abs(y_max) * 0.1 + 0.001;
+        
+        ImPlot::SetupAxis(ImAxis_X1, "Predicted");
+        ImPlot::SetupAxis(ImAxis_Y1, "Actual");
+        ImPlot::SetupAxisLimits(ImAxis_X1, x_min - x_padding, x_max + x_padding, ImGuiCond_Always);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, y_min - y_padding, y_max + y_padding, ImGuiCond_Always);
+        
+        // Plot all points
+        ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, 4);
+        ImPlot::PushStyleColor(ImPlotCol_MarkerFill, ImVec4(0.2f, 0.4f, 0.8f, 0.7f));
+        ImPlot::PlotScatter("##AllPredictions", 
+                           pred_data.data(), 
+                           actual_data.data(), 
+                           min_size);
+        ImPlot::PopStyleColor();
+        ImPlot::PopStyleVar();
+        
+        // Get plot limits for drawing lines
+        ImPlotRect limits = ImPlot::GetPlotLimits();
+        
+        // Draw threshold line (vertical)
+        double threshold_val = static_cast<double>(m_testModelState.trading_threshold);
+        if (threshold_val >= limits.X.Min && threshold_val <= limits.X.Max) {
+            double threshold_x[] = {threshold_val, threshold_val};
+            double threshold_y[] = {limits.Y.Min, limits.Y.Max};
+            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1, 0, 0, 1));
+            ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 2.0f);
+            ImPlot::PlotLine("##ThresholdLine", threshold_x, threshold_y, 2);
+            ImPlot::PopStyleVar();
+            ImPlot::PopStyleColor();
+        }
+        
+        // Draw diagonal reference line (perfect predictions)
+        double diag_min = std::min(limits.X.Min, limits.Y.Min);
+        double diag_max = std::max(limits.X.Max, limits.Y.Max);
+        double diag_x[] = {diag_min, diag_max};
+        double diag_y[] = {diag_min, diag_max};
+        ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+        ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 1.0f);
+        ImPlot::PlotLine("##PerfectLine", diag_x, diag_y, 2);
+        ImPlot::PopStyleVar();
+        ImPlot::PopStyleColor();
+        
+        // Highlight signals (predictions above threshold)
+        std::vector<double> signal_x, signal_y;
+        for (size_t i = 0; i < min_size; ++i) {
+            if (pred_data[i] > threshold_val) {
+                signal_x.push_back(pred_data[i]);
+                signal_y.push_back(actual_data[i]);
+            }
+        }
+        
+        if (!signal_x.empty()) {
+            ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, 6);
+            ImPlot::PushStyleColor(ImPlotCol_MarkerFill, ImVec4(0, 1, 0, 0.8f));
+            ImPlot::PushStyleColor(ImPlotCol_MarkerOutline, ImVec4(0, 0.8f, 0, 1.0f));
+            ImPlot::PlotScatter("##SignalPoints", signal_x.data(), signal_y.data(), signal_x.size());
+            ImPlot::PopStyleColor(2);
+            ImPlot::PopStyleVar();
+        }
+        
+        ImPlot::EndPlot();
+    }
+    
+    // Show data range info
+    if (min_size > 0) {
+        auto [min_pred, max_pred] = std::minmax_element(
+            m_testModelState.test_predictions.begin(), 
+            m_testModelState.test_predictions.begin() + min_size);
+        auto [min_actual, max_actual] = std::minmax_element(
+            m_testModelState.test_actuals.begin(),
+            m_testModelState.test_actuals.begin() + min_size);
+        
+        ImGui::Text("Predictions range: [%.6f, %.6f]", *min_pred, *max_pred);
+        ImGui::Text("Actuals range: [%.6f, %.6f]", *min_actual, *max_actual);
+    }
+}
+
+void SimulationWindow::DrawTestModel() {
+    ImGui::Text("Test Model on Specific Data Range");
+    ImGui::Separator();
+    
+    // Show configuration source
+    if (m_testModelState.config_source == TestModelState::FROM_FOLD) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
+        ImGui::Text("Configuration from: %s - Fold %d", 
+                    m_testModelState.source_run_name.c_str(), 
+                    m_testModelState.source_fold_number);
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            m_testModelState.ResetToManual();
+        }
+        ImGui::Separator();
+    }
+    
+    // Training range inputs
+    ImGui::Text("Training Data Range:");
+    ImGui::Text("Start Row:");
+    ImGui::SameLine();
+    if (ImGui::InputInt("##train_start", &m_testModelState.train_start_row, 1000, 5000)) {
+        m_testModelState.train_start_row = std::max(0, m_testModelState.train_start_row);
+        m_testModelState.ResetToManual();  // Switch to manual mode when user edits
+    }
+    
+    ImGui::Text("End Row:");
+    ImGui::SameLine();
+    if (ImGui::InputInt("##train_end", &m_testModelState.train_end_row, 1000, 5000)) {
+        m_testModelState.train_end_row = std::max(m_testModelState.train_start_row + 1000, 
+                                                   m_testModelState.train_end_row);
+        m_testModelState.ResetToManual();  // Switch to manual mode when user edits
+    }
+    
+    ImGui::Separator();
+    
+    // Test range inputs
+    ImGui::Text("Test Data Range:");
+    ImGui::Text("Start Row:");
+    ImGui::SameLine();
+    if (ImGui::InputInt("##test_start", &m_testModelState.test_start_row, 50, 200)) {
+        m_testModelState.test_start_row = std::max(m_testModelState.train_end_row, 
+                                                   m_testModelState.test_start_row);
+        m_testModelState.ResetToManual();  // Switch to manual mode when user edits
+    }
+    
+    ImGui::Text("End Row:");
+    ImGui::SameLine();
+    if (ImGui::InputInt("##test_end", &m_testModelState.test_end_row, 50, 200)) {
+        m_testModelState.test_end_row = std::max(m_testModelState.test_start_row + 50, 
+                                                 m_testModelState.test_end_row);
+        m_testModelState.ResetToManual();  // Switch to manual mode when user edits
+    }
+    
+    ImGui::Separator();
+    
+    // Trading threshold
+    ImGui::Text("Trading Threshold:");
+    if (ImGui::InputFloat("##threshold", &m_testModelState.trading_threshold, 0.0001f, 0.001f, "%.6f")) {
+        m_testModelState.threshold_manually_set = true;
+        // Recalculate metrics if model is trained
+        if (m_testModelState.model_trained) {
+            // Recalculate accuracy metrics with new threshold
+            m_testModelState.signals_generated = 0;
+            int correct_signals = 0;
+            
+            for (size_t i = 0; i < m_testModelState.test_predictions.size(); ++i) {
+                if (m_testModelState.test_predictions[i] > m_testModelState.trading_threshold) {
+                    m_testModelState.signals_generated++;
+                    if (m_testModelState.test_actuals[i] > 0) {
+                        correct_signals++;
+                    }
+                }
+            }
+            
+            if (m_testModelState.signals_generated > 0) {
+                m_testModelState.hit_rate = (float)correct_signals / m_testModelState.signals_generated;
+                m_testModelState.accuracy_above_threshold = m_testModelState.hit_rate;
+            } else {
+                m_testModelState.hit_rate = 0.0f;
+                m_testModelState.accuracy_above_threshold = 0.0f;
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Auto")) {
+        m_testModelState.threshold_manually_set = false;
+        // Will recalculate based on model
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Calculate threshold automatically using 95th percentile");
+    }
+    
+    ImGui::Separator();
+    
+    // Train button
+    if (ImGui::Button("Train & Test Model")) {
+        RunTestModel();
+    }
+    
+    // Show results if model is trained
+    if (m_testModelState.model_trained) {
+        ImGui::Separator();
+        ImGui::Text("Results:");
+        ImGui::Text("Signals Generated: %d", m_testModelState.signals_generated);
+        ImGui::Text("Hit Rate: %.2f%%", m_testModelState.hit_rate * 100.0f);
+        ImGui::Text("Accuracy Above Threshold: %.2f%%", m_testModelState.accuracy_above_threshold * 100.0f);
+        
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x);
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), 
+                          "Note: Test Model retrains from scratch. Results may vary from original fold "
+                          "due to random initialization. The threshold is preserved from the original fold.");
+        ImGui::PopTextWrapPos();
+        
+        ImGui::Separator();
+        
+        // Feature importance plot
+        if (ImGui::CollapsingHeader("Feature Importance")) {
+            PlotFeatureImportance();
+        }
+        
+        // Prediction scatter plot
+        if (ImGui::CollapsingHeader("Predictions vs Actuals")) {
+            PlotPredictionScatter();
+        }
+        
+        // Predictions histogram
+        if (ImGui::CollapsingHeader("Predictions Distribution")) {
+            if (!m_testModelState.test_predictions.empty()) {
+                // Calculate histogram bins
+                auto [min_it, max_it] = std::minmax_element(
+                    m_testModelState.test_predictions.begin(), 
+                    m_testModelState.test_predictions.end());
+                float min_val = *min_it;
+                float max_val = *max_it;
+                
+                int num_bins = 30;
+                std::vector<double> bin_counts(num_bins, 0);
+                float bin_width = (max_val - min_val) / num_bins;
+                
+                if (bin_width > 0) {
+                    // Count predictions in each bin
+                    for (float pred : m_testModelState.test_predictions) {
+                        int bin_idx = std::min((int)((pred - min_val) / bin_width), num_bins - 1);
+                        if (bin_idx >= 0 && bin_idx < num_bins) {
+                            bin_counts[bin_idx]++;
+                        }
+                    }
+                    
+                    // Create bin centers for plotting
+                    std::vector<double> bin_centers(num_bins);
+                    for (int i = 0; i < num_bins; ++i) {
+                        bin_centers[i] = min_val + (i + 0.5) * bin_width;
+                    }
+                    
+                    if (ImPlot::BeginPlot("##PredictionsHistogram", ImVec2(-1, 250))) {
+                        // Calculate proper axis limits
+                        double max_count = *std::max_element(bin_counts.begin(), bin_counts.end());
+                        double x_range_min = min_val - bin_width * 1.5;
+                        double x_range_max = max_val + bin_width * 1.5;
+                        
+                        // Include threshold in range
+                        if (m_testModelState.trading_threshold < x_range_min) {
+                            x_range_min = m_testModelState.trading_threshold - bin_width;
+                        }
+                        if (m_testModelState.trading_threshold > x_range_max) {
+                            x_range_max = m_testModelState.trading_threshold + bin_width;
+                        }
+                        
+                        ImPlot::SetupAxis(ImAxis_X1, "Prediction Value");
+                        ImPlot::SetupAxis(ImAxis_Y1, "Count");
+                        ImPlot::SetupAxisLimits(ImAxis_X1, x_range_min, x_range_max, ImGuiCond_Always);
+                        ImPlot::SetupAxisLimits(ImAxis_Y1, 0, max_count * 1.1, ImGuiCond_Always);
+                        
+                        // Plot histogram bars
+                        ImPlot::PlotBars("##PredHist", bin_centers.data(), bin_counts.data(), 
+                                        num_bins, bin_width * 0.9);
+                        
+                        // Add vertical line for threshold
+                        double threshold_x[] = {(double)m_testModelState.trading_threshold, 
+                                               (double)m_testModelState.trading_threshold};
+                        double threshold_y[] = {0, max_count * 1.05};
+                        ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1, 0, 0, 1));
+                        ImPlot::PushStyleVar(ImPlotStyleVar_LineWeight, 2.0f);
+                        ImPlot::PlotLine("##ThresholdHistLine", threshold_x, threshold_y, 2);
+                        ImPlot::PopStyleVar();
+                        ImPlot::PopStyleColor();
+                        
+                        // Add text annotation for threshold
+                        if (ImPlot::IsPlotHovered()) {
+                            ImPlot::Annotation(m_testModelState.trading_threshold, max_count * 0.9, 
+                                             ImVec4(1, 0, 0, 1), ImVec2(5, -5), true, 
+                                             "Threshold: %.4f", m_testModelState.trading_threshold);
+                        }
+                        
+                        ImPlot::EndPlot();
+                    }
+                    
+                    // Show statistics
+                    float mean = std::accumulate(m_testModelState.test_predictions.begin(), 
+                                                m_testModelState.test_predictions.end(), 0.0f) / 
+                                m_testModelState.test_predictions.size();
+                    float variance = 0;
+                    for (float pred : m_testModelState.test_predictions) {
+                        variance += (pred - mean) * (pred - mean);
+                    }
+                    variance /= m_testModelState.test_predictions.size();
+                    float std_dev = std::sqrt(variance);
+                    
+                    ImGui::Text("Mean: %.6f, Std Dev: %.6f", mean, std_dev);
+                    ImGui::Text("Min: %.6f, Max: %.6f", min_val, max_val);
+                    ImGui::Text("Threshold: %.6f", m_testModelState.trading_threshold);
+                } else {
+                    ImGui::Text("All predictions have the same value: %.6f", min_val);
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "Warning: Model may not be learning!");
+                }
+            } else {
+                ImGui::Text("No predictions available");
+            }
+        }
+    }
+}
+
+// Implementation of missing XGBoost simulation methods
+FoldResult SimulationWindow::testSingleFold(int train_start, int train_end, int test_start, int test_end) {
+    FoldResult result = {};
+    result.train_start = train_start;
+    result.train_end = train_end;
+    result.test_start = test_start;
+    result.test_end = test_end;
+    
+    try {
+        // Calculate train/val split
+        float val_split = m_runningConfig.val_split_ratio;
+        int split_point = train_start + (int)((train_end - train_start) * val_split);
+        
+        result.n_train_samples = split_point - train_start;
+        result.n_val_samples = train_end - split_point;
+        result.n_test_samples = test_end - test_start;
+        
+        // Extract training data
+        std::vector<float> X_train_flat, y_train;
+        int n_train = split_point - train_start;
+        X_train_flat.resize(n_train * m_runningConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < m_runningConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = m_runningConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, train_start, split_point);
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_train_flat[i * m_runningConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_train = extractColumnData(m_runningConfig.target_column, train_start, split_point);
+        
+        // Extract validation data
+        std::vector<float> X_val_flat, y_val;
+        int n_val = train_end - split_point;
+        X_val_flat.resize(n_val * m_runningConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < m_runningConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = m_runningConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, split_point, train_end);
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_val_flat[i * m_runningConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_val = extractColumnData(m_runningConfig.target_column, split_point, train_end);
+        
+        // Extract test data
+        std::vector<float> X_test_flat, y_test;
+        int n_test = test_end - test_start;
+        X_test_flat.resize(n_test * m_runningConfig.feature_columns.size());
+        
+        for (size_t feat_idx = 0; feat_idx < m_runningConfig.feature_columns.size(); ++feat_idx) {
+            const std::string& feature = m_runningConfig.feature_columns[feat_idx];
+            auto columnData = extractColumnData(feature, test_start, test_end);
+            for (size_t i = 0; i < columnData.size(); ++i) {
+                X_test_flat[i * m_runningConfig.feature_columns.size() + feat_idx] = columnData[i];
+            }
+        }
+        y_test = extractColumnData(m_runningConfig.target_column, test_start, test_end);
+        
+        // Calculate transformation parameters from training data
+        float sum = std::accumulate(y_train.begin(), y_train.end(), 0.0f);
+        result.mean_scale = sum / y_train.size();
+        
+        float sq_sum = 0.0f;
+        for (float val : y_train) {
+            float diff = val - result.mean_scale;
+            sq_sum += diff * diff;
+        }
+        result.std_scale = std::sqrt(sq_sum / y_train.size());
+        if (result.std_scale == 0.0f) {
+            result.std_scale = 1.0f;
+        }
+        
+        // Apply transformation
+        std::vector<float> y_train_scaled, y_val_scaled, y_test_scaled;
+        if (m_runningConfig.use_tanh_transform) {
+            for (float val : y_train) {
+                float standardized = (val - result.mean_scale) / result.std_scale;
+                float scaled = standardized * m_runningConfig.tanh_scaling_factor;
+                y_train_scaled.push_back(std::tanh(scaled));
+            }
+            for (float val : y_val) {
+                float standardized = (val - result.mean_scale) / result.std_scale;
+                float scaled = standardized * m_runningConfig.tanh_scaling_factor;
+                y_val_scaled.push_back(std::tanh(scaled));
+            }
+            for (float val : y_test) {
+                float standardized = (val - result.mean_scale) / result.std_scale;
+                float scaled = standardized * m_runningConfig.tanh_scaling_factor;
+                y_test_scaled.push_back(std::tanh(scaled));
+            }
+        } else if (m_runningConfig.use_standardization) {
+            for (float val : y_train) {
+                y_train_scaled.push_back((val - result.mean_scale) / result.std_scale);
+            }
+            for (float val : y_val) {
+                y_val_scaled.push_back((val - result.mean_scale) / result.std_scale);
+            }
+            for (float val : y_test) {
+                y_test_scaled.push_back((val - result.mean_scale) / result.std_scale);
+            }
+        } else {
+            y_train_scaled = y_train;
+            y_val_scaled = y_val;
+            y_test_scaled = y_test;
+            result.mean_scale = 0.0f;
+            result.std_scale = 1.0f;
+        }
+        
+        // Create XGBoost DMatrices
+        DMatrixHandle dtrain, dval, dtest;
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_train_flat.data(), n_train, 
+                                 m_runningConfig.feature_columns.size(), -1, &dtrain),
+            "Creating training matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dtrain, "label", y_train_scaled.data(), y_train_scaled.size()),
+            "Setting training labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_val_flat.data(), n_val, 
+                                 m_runningConfig.feature_columns.size(), -1, &dval),
+            "Creating validation matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dval, "label", y_val_scaled.data(), y_val_scaled.size()),
+            "Setting validation labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_test_flat.data(), n_test, 
+                                 m_runningConfig.feature_columns.size(), -1, &dtest),
+            "Creating test matrix"
+        );
+        
+        // Create and configure booster
+        DMatrixHandle eval_dmats[2] = {dtrain, dval};
+        const char* eval_names[2] = {"train", "val"};
+        
+        BoosterHandle booster;
+        checkXGBoostError(
+            XGBoosterCreate(eval_dmats, 2, &booster),
+            "Creating booster"
+        );
+        
+        // Set parameters
+        checkXGBoostError(XGBoosterSetParam(booster, "learning_rate", 
+                                           std::to_string(m_runningConfig.learning_rate).c_str()), "Setting learning_rate");
+        checkXGBoostError(XGBoosterSetParam(booster, "max_depth", 
+                                           std::to_string(m_runningConfig.max_depth).c_str()), "Setting max_depth");
+        checkXGBoostError(XGBoosterSetParam(booster, "min_child_weight", 
+                                           std::to_string(m_runningConfig.min_child_weight).c_str()), "Setting min_child_weight");
+        checkXGBoostError(XGBoosterSetParam(booster, "subsample", 
+                                           std::to_string(m_runningConfig.subsample).c_str()), "Setting subsample");
+        checkXGBoostError(XGBoosterSetParam(booster, "colsample_bytree", 
+                                           std::to_string(m_runningConfig.colsample_bytree).c_str()), "Setting colsample_bytree");
+        checkXGBoostError(XGBoosterSetParam(booster, "lambda", 
+                                           std::to_string(m_runningConfig.lambda).c_str()), "Setting lambda");
+        checkXGBoostError(XGBoosterSetParam(booster, "objective", "reg:squarederror"), "Setting objective");
+        checkXGBoostError(XGBoosterSetParam(booster, "tree_method", "hist"), "Setting tree_method");
+        checkXGBoostError(XGBoosterSetParam(booster, "seed", "43"), "Setting seed");
+        
+        // Try GPU first, fallback to CPU
+        int gpu_result = XGBoosterSetParam(booster, "device", "cuda");
+        if (gpu_result != 0) {
+            checkXGBoostError(XGBoosterSetParam(booster, "device", "cpu"), "Setting device to CPU");
+        }
+        
+        // Train the model with early stopping
+        float best_score = std::numeric_limits<float>::max();
+        int best_iteration = 0;
+        int rounds_without_improvement = 0;
+        bool ever_improved = false;
+        float initial_score = std::numeric_limits<float>::max();
+        int effective_min_boost_rounds = m_runningConfig.min_boost_rounds;
+        
+        for (int iter = 0; iter < m_runningConfig.num_boost_round; ++iter) {
+            checkXGBoostError(
+                XGBoosterUpdateOneIter(booster, iter, dtrain),
+                "Training iteration"
+            );
+            
+            // Evaluate on validation set
+            const char* eval_result;
+            checkXGBoostError(
+                XGBoosterEvalOneIter(booster, iter, eval_dmats, eval_names, 2, &eval_result),
+                "Evaluation iteration"
+            );
+            
+            // Parse validation score
+            std::string eval_str(eval_result);
+            size_t val_pos = eval_str.find("val-rmse:");
+            if (val_pos != std::string::npos) {
+                float val_score = std::stof(eval_str.substr(val_pos + 9));
+                
+                if (iter == 0) {
+                    initial_score = val_score;
+                }
+                
+                if (val_score < best_score) {
+                    best_score = val_score;
+                    best_iteration = iter;
+                    rounds_without_improvement = 0;
+                    ever_improved = true;
+                } else {
+                    rounds_without_improvement++;
+                }
+                
+                if (iter == 0 && !ever_improved) {
+                    effective_min_boost_rounds = std::max(50, effective_min_boost_rounds);
+                }
+                
+                if (iter >= effective_min_boost_rounds && 
+                    rounds_without_improvement >= m_runningConfig.early_stopping_rounds) {
+                    break;
+                }
+            }
+        }
+        
+        result.best_iteration = best_iteration;
+        result.best_score = best_score;
+        result.model_learned_nothing = !ever_improved;
+        
+        // If model didn't learn and we have a cached model, use it instead
+        if (result.model_learned_nothing && m_runningConfig.reuse_previous_model && m_cachedModel.is_valid) {
+            std::cout << "Model failed to learn, attempting to use cached model from fold " 
+                      << m_cachedModel.source_fold << std::endl;
+            
+            // Free the failed booster and load the cached one
+            XGBoosterFree(booster);
+            booster = LoadCachedModel();
+            
+            if (booster != nullptr) {
+                // Use cached model's parameters
+                result.mean_scale = m_cachedModel.transform_params.mean;
+                result.std_scale = m_cachedModel.transform_params.std_dev;
+                result.prediction_threshold_scaled = m_cachedModel.prediction_threshold_scaled;
+                result.prediction_threshold_original = m_cachedModel.prediction_threshold_original;
+                result.dynamic_positive_threshold = m_cachedModel.dynamic_positive_threshold;
+                result.used_cached_model = true;
+                result.model_learned_nothing = false;  // We have a working model now
+                
+                std::cout << "Successfully loaded cached model with threshold: " 
+                          << result.prediction_threshold_original << std::endl;
+            } else {
+                std::cerr << "Failed to load cached model, no signals will be generated" << std::endl;
+                // Keep model_learned_nothing = true, which will result in no signals
+            }
+        }
+        
+        // Calculate threshold only if we're not using a cached model
+        if (!result.used_cached_model) {
+            // Make predictions on validation set for threshold calculation
+            bst_ulong val_len;
+            const float* val_predictions;
+            checkXGBoostError(
+                XGBoosterPredict(booster, dval, 0, 0, 0, &val_len, &val_predictions),
+                "Predicting validation set"
+            );
+            
+            // Calculate threshold in transformed space
+            std::vector<float> val_preds_scaled(val_predictions, val_predictions + val_len);
+            result.prediction_threshold_scaled = calculateQuantile(val_preds_scaled, 0.95f);
+            
+            // Inverse transform threshold
+            if (m_runningConfig.use_tanh_transform) {
+                float clamped = std::max(-0.9999f, std::min(0.9999f, result.prediction_threshold_scaled));
+                float atanh_val = 0.5f * std::log((1.0f + clamped) / (1.0f - clamped));
+                result.prediction_threshold_original = (atanh_val / m_runningConfig.tanh_scaling_factor) * 
+                                                      result.std_scale + result.mean_scale;
+            } else if (m_runningConfig.use_standardization) {
+                result.prediction_threshold_original = result.prediction_threshold_scaled * result.std_scale + 
+                                                      result.mean_scale;
+            } else {
+                result.prediction_threshold_original = result.prediction_threshold_scaled;
+            }
+            
+            // Also calculate dynamic positive threshold for signals
+            result.dynamic_positive_threshold = 0.0f;
+        }
+        
+        // Only make predictions if we have a valid model (either learned or cached)
+        if (!result.model_learned_nothing) {
+            // Make predictions on test set
+            bst_ulong test_len;
+            const float* test_predictions;
+            checkXGBoostError(
+                XGBoosterPredict(booster, dtest, 0, 0, 0, &test_len, &test_predictions),
+                "Predicting test set"
+            );
+            
+            // Analyze test results
+            result.n_signals = 0;
+            result.signal_sum = 0.0f;
+            int correct_signals = 0;
+            std::vector<float> returns_on_signals;
+            
+            for (bst_ulong i = 0; i < test_len; ++i) {
+                float pred_scaled = test_predictions[i];
+                float pred_original;
+                
+                // Inverse transform prediction
+                if (m_runningConfig.use_tanh_transform) {
+                    float clamped = std::max(-0.9999f, std::min(0.9999f, pred_scaled));
+                    float atanh_val = 0.5f * std::log((1.0f + clamped) / (1.0f - clamped));
+                    pred_original = (atanh_val / m_runningConfig.tanh_scaling_factor) * 
+                                  result.std_scale + result.mean_scale;
+                } else if (m_runningConfig.use_standardization) {
+                    pred_original = pred_scaled * result.std_scale + result.mean_scale;
+                } else {
+                    pred_original = pred_scaled;
+                }
+                
+                // Check if signal should be generated
+                if (pred_original > result.prediction_threshold_original && 
+                    pred_original > result.dynamic_positive_threshold) {
+                    result.n_signals++;
+                    result.signal_sum += y_test[i];
+                    returns_on_signals.push_back(y_test[i]);
+                    
+                    if (y_test[i] > 0) {
+                        correct_signals++;
+                    }
+                    result.avg_predicted_return_on_signals += pred_original;
+                }
+            }
+            
+            // Calculate statistics
+            if (result.n_signals > 0) {
+                result.signal_rate = (float)result.n_signals / test_len;
+                result.avg_return_on_signals = result.signal_sum / result.n_signals;
+                result.median_return_on_signals = calculateMedian(returns_on_signals);
+                result.std_return_on_signals = calculateStdDev(returns_on_signals, result.avg_return_on_signals);
+                result.hit_rate = (float)correct_signals / result.n_signals;
+                result.avg_predicted_return_on_signals /= result.n_signals;
+            }
+        } else {
+            // Model failed to learn and no cached model available - no trading
+            std::cout << "Skipping predictions - model failed to learn and no cached model available" << std::endl;
+            result.n_signals = 0;
+            result.signal_sum = 0.0f;
+            result.signal_rate = 0.0f;
+            result.avg_return_on_signals = 0.0f;
+            result.median_return_on_signals = 0.0f;
+            result.std_return_on_signals = 0.0f;
+            result.hit_rate = 0.0f;
+            result.avg_predicted_return_on_signals = 0.0f;
+        }
+        
+        // Cache model if it learned something and caching is enabled
+        if (!result.model_learned_nothing && m_runningConfig.reuse_previous_model) {
+            TransformParams params;
+            params.mean = result.mean_scale;
+            params.std_dev = result.std_scale;
+            params.scaling_factor = m_runningConfig.tanh_scaling_factor;
+            CacheModel(booster, params, result.prediction_threshold_scaled, 
+                      result.prediction_threshold_original, result.dynamic_positive_threshold, 
+                      result.fold_number);
+        }
+        
+        // Clean up
+        XGBoosterFree(booster);
+        XGDMatrixFree(dtrain);
+        XGDMatrixFree(dval);
+        XGDMatrixFree(dtest);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error in testSingleFold: " << e.what() << std::endl;
+        result.model_learned_nothing = true;
+    }
+    
+    return result;
+}

@@ -1,0 +1,542 @@
+#include "SimulationEngine.h"
+#include "SimulationUtils.h"
+#include "PerformanceMetrics.h"
+#include "models/XGBoostModel.h"
+#include "XGBoostConfig.h"
+#include "../TimeSeriesWindow.h"
+#include "../analytics_dataframe.h"
+#include <iostream>
+#include <iomanip>
+#include <chrono>
+#include <cmath>
+#include <arrow/scalar.h>
+#include <arrow/type.h>
+
+namespace simulation {
+
+SimulationEngine::SimulationEngine()
+    : m_timeSeriesWindow(nullptr)
+    , m_enableCaching(true)
+    , m_isRunning(false)
+    , m_shouldStop(false)
+    , m_currentFold(0)
+    , m_totalFolds(0) {
+}
+
+SimulationEngine::~SimulationEngine() {
+    // Make sure to stop and wait for thread before destroying
+    if (m_isRunning.load()) {
+        StopSimulation();
+    }
+    // Extra safety check
+    if (m_simulationThread.joinable()) {
+        m_simulationThread.join();
+    }
+}
+
+void SimulationEngine::SetModel(std::unique_ptr<ISimulationModel> model) {
+    if (m_isRunning.load()) {
+        std::cerr << "Cannot change model while simulation is running" << std::endl;
+        return;
+    }
+    m_model = std::move(model);
+}
+
+void SimulationEngine::SetModelConfig(std::unique_ptr<ModelConfigBase> config) {
+    if (m_isRunning.load()) {
+        std::cerr << "Cannot change configuration while simulation is running" << std::endl;
+        return;
+    }
+    m_modelConfig = std::move(config);
+}
+
+void SimulationEngine::SetWalkForwardConfig(const WalkForwardConfig& config) {
+    if (m_isRunning.load()) {
+        std::cerr << "Cannot change configuration while simulation is running" << std::endl;
+        return;
+    }
+    m_walkForwardConfig = config;
+}
+
+void SimulationEngine::StartSimulation() {
+    if (m_isRunning.load()) {
+        std::cerr << "Simulation already running" << std::endl;
+        return;
+    }
+    
+    // Clean up old thread if it exists
+    if (m_simulationThread.joinable()) {
+        m_simulationThread.join();
+    }
+    
+    if (!m_model || !m_modelConfig) {
+        std::cerr << "Model and configuration must be set before starting simulation" << std::endl;
+        return;
+    }
+    
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        std::cerr << "No data available for simulation" << std::endl;
+        return;
+    }
+    
+    // Initialize run
+    m_currentRun = SimulationRun();
+    m_currentRun.name = "Run_" + std::to_string(
+        std::chrono::system_clock::now().time_since_epoch().count());
+    m_currentRun.model_type = m_model->GetModelType();
+    
+    // Store a copy of the configuration in the run
+    // This is needed so TestModelWindow can access it later
+    if (m_model->GetModelType() == "XGBoost") {
+        auto* xgb_src = dynamic_cast<XGBoostConfig*>(m_modelConfig.get());
+        if (xgb_src) {
+            m_currentRun.config = std::make_unique<XGBoostConfig>(*xgb_src);
+        }
+    }
+    // For other model types, would need similar handling
+    
+    m_currentRun.walk_forward_config = m_walkForwardConfig;
+    m_currentRun.startTime = std::chrono::system_clock::now();
+    m_currentRun.completed = false;
+    
+    // Clear cache
+    m_modelCache.Clear();
+    
+    // Calculate total folds
+    m_totalFolds.store(CalculateMaxFolds());
+    m_currentFold.store(0);
+    
+    // Start simulation thread
+    m_isRunning.store(true);
+    m_shouldStop.store(false);
+    m_simulationThread = std::thread(&SimulationEngine::RunSimulationThread, this);
+}
+
+void SimulationEngine::StopSimulation() {
+    if (!m_isRunning.load()) return;  // Already stopped
+    
+    m_shouldStop.store(true);
+    
+    // Don't block the UI thread! The thread will stop at the next fold boundary.
+    // The thread will set m_isRunning to false when it exits.
+    // We'll clean up the thread later in StartSimulation or destructor.
+}
+
+void SimulationEngine::RunSimulationThread() {
+    std::cout << "Starting " << m_model->GetModelType() << " simulation with "
+              << m_modelConfig->feature_columns.size() << " features" << std::endl;
+    std::cout << "Target: " << m_modelConfig->target_column << std::endl;
+    std::cout << "Walk-forward: Train=" << m_walkForwardConfig.train_size 
+              << ", Test=" << m_walkForwardConfig.test_size
+              << ", Gap=" << m_walkForwardConfig.train_test_gap
+              << ", Step=" << m_walkForwardConfig.fold_step << std::endl;
+    
+    float running_sum = 0.0f;
+    int total_folds = m_totalFolds.load();
+    
+    // Calculate actual end fold
+    int max_folds = CalculateMaxFolds();
+    int actual_end_fold = (m_walkForwardConfig.end_fold == -1) ? 
+        max_folds : std::min(m_walkForwardConfig.end_fold, max_folds);
+    
+    // Performance tracker for monitoring degradation
+    metrics::PerformanceTracker tracker;
+    
+    // Walk-forward loop
+    for (int fold = m_walkForwardConfig.start_fold; 
+         fold <= actual_end_fold && !m_shouldStop.load(); 
+         ++fold) {
+        
+        m_currentFold.store(fold - m_walkForwardConfig.start_fold + 1);
+        
+        // Calculate data ranges
+        int train_start = m_walkForwardConfig.initial_offset + 
+            (fold - m_walkForwardConfig.start_fold) * m_walkForwardConfig.fold_step;
+        int train_end = train_start + m_walkForwardConfig.train_size;
+        int test_start = train_end + m_walkForwardConfig.train_test_gap;
+        int test_end = test_start + m_walkForwardConfig.test_size;
+        
+        try {
+            // Process fold
+            FoldResult result = ProcessSingleFold(train_start, train_end, test_start, test_end, fold);
+            
+            // Update running sum
+            if (result.n_signals > 0) {
+                running_sum += result.signal_sum;
+                std::cout << "===> Running sum: " << std::fixed << std::setprecision(6) 
+                         << running_sum << " <====" << std::endl;
+                std::cout << "Signals: " << result.n_signals 
+                         << ", Hit rate: " << std::fixed << std::setprecision(2) 
+                         << (result.hit_rate * 100) << "%" << std::endl;
+            } else {
+                std::cout << "No signals generated." << std::endl;
+            }
+            
+            result.running_sum = running_sum;
+            
+            // Calculate comprehensive metrics
+            if (result.n_signals > 0) {
+                // Get predictions and actuals for metrics
+                // This would normally come from ProcessSingleFold
+                // For now, using simplified metrics from fold result
+                metrics::PerformanceMetrics::RegressionMetrics fold_metrics = {};
+                fold_metrics.hit_rate = result.hit_rate;
+                fold_metrics.sharpe_ratio = result.avg_return_on_signals / 
+                    (result.std_return_on_signals > 0 ? result.std_return_on_signals : 1.0f);
+                fold_metrics.directional_accuracy = result.hit_rate;  // Simplified
+                
+                tracker.AddFoldMetrics(fold, fold_metrics);
+                
+                // Check for performance degradation
+                if (fold % 10 == 0 && fold > m_walkForwardConfig.start_fold + 20) {
+                    if (tracker.IsPerformanceDegrading("sharpe_ratio", 10)) {
+                        std::cout << "WARNING: Performance degradation detected" << std::endl;
+                    }
+                }
+            }
+            
+            // Add to results
+            if (!m_shouldStop.load()) {
+                m_currentRun.foldResults.push_back(result);
+                m_currentRun.profitPlotX.push_back(fold);
+                m_currentRun.profitPlotY.push_back(running_sum);
+                
+                // Notify callback
+                if (m_progressCallback) {
+                    m_progressCallback(m_currentFold.load(), total_folds);
+                }
+                if (m_foldCallback) {
+                    m_foldCallback(result);
+                }
+            }
+            
+            std::cout << std::string(50, '-') << std::endl;
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Error in fold " << fold << ": " << e.what() << std::endl;
+            // Continue with next fold
+        }
+    }
+    
+    // Mark completion
+    m_currentRun.completed = true;
+    
+    // Calculate summary metrics
+    if (!m_currentRun.foldResults.empty()) {
+        auto avg_metrics = tracker.GetAverageMetrics();
+        std::cout << "\n=== Simulation Summary ===" << std::endl;
+        std::cout << "Total folds: " << m_currentRun.foldResults.size() << std::endl;
+        std::cout << "Final sum: " << running_sum << std::endl;
+        std::cout << "Avg Sharpe: " << avg_metrics.sharpe_ratio << std::endl;
+        std::cout << "Avg Hit Rate: " << (avg_metrics.hit_rate * 100) << "%" << std::endl;
+    }
+    
+    // Notify completion
+    if (m_completeCallback) {
+        m_completeCallback(m_currentRun);
+    }
+    
+    m_isRunning.store(false);
+    std::cout << m_model->GetModelType() << " simulation completed." << std::endl;
+}
+
+FoldResult SimulationEngine::ProcessSingleFold(
+    int train_start, int train_end,
+    int test_start, int test_end,
+    int fold_number) {
+    
+    FoldResult result = {};
+    result.fold_number = fold_number;
+    result.train_start = train_start;
+    result.train_end = train_end;
+    result.test_start = test_start;
+    result.test_end = test_end;
+    
+    try {
+        // Calculate train/val split
+        float val_split = m_modelConfig->val_split_ratio;
+        int split_point = train_start + (int)((train_end - train_start) * val_split);
+        
+        result.n_train_samples = split_point - train_start;
+        result.n_val_samples = train_end - split_point;
+        result.n_test_samples = test_end - test_start;
+        
+        // Extract data
+        auto X_train = ExtractFeatures(train_start, split_point);
+        auto y_train = ExtractTarget(train_start, split_point);
+        auto X_val = ExtractFeatures(split_point, train_end);
+        auto y_val = ExtractTarget(split_point, train_end);
+        auto X_test = ExtractFeatures(test_start, test_end);
+        auto y_test = ExtractTarget(test_start, test_end);
+        
+        int num_features = m_modelConfig->feature_columns.size();
+        
+        // Train model
+        auto train_result = m_model->Train(X_train, y_train, X_val, y_val, 
+                                          *m_modelConfig, num_features);
+        
+        result.best_iteration = train_result.best_iteration;
+        result.best_score = train_result.best_score;
+        result.model_learned_nothing = !train_result.model_learned;
+        result.mean_scale = train_result.transform_params.mean;
+        result.std_scale = train_result.transform_params.std_dev;
+        
+        // Handle model caching/reuse
+        if (result.model_learned_nothing && m_enableCaching && m_modelCache.HasCachedModel()) {
+            // Try to use cached model
+            TransformParams cached_params;
+            float cached_thresh_scaled, cached_thresh_orig, cached_dyn_thresh;
+            
+            if (m_modelCache.LoadCachedModel(*m_model, cached_params,
+                                            cached_thresh_scaled, cached_thresh_orig, 
+                                            cached_dyn_thresh)) {
+                std::cout << "Fold " << fold_number << " failed to learn - using cached model from fold " 
+                         << m_modelCache.GetSourceFold() << std::endl;
+                
+                result.used_cached_model = true;
+                result.model_learned_nothing = false;
+                result.mean_scale = cached_params.mean;
+                result.std_scale = cached_params.std_dev;
+                result.prediction_threshold_scaled = cached_thresh_scaled;
+                result.prediction_threshold_original = cached_thresh_orig;
+                result.dynamic_positive_threshold = cached_dyn_thresh;
+            } else {
+                std::cerr << "Failed to load cached model, no signals will be generated" << std::endl;
+            }
+        } else if (!result.model_learned_nothing) {
+            // Model learned - calculate threshold and cache if enabled
+            result.prediction_threshold_scaled = train_result.validation_threshold;
+            
+            // Inverse transform threshold
+            result.prediction_threshold_original = utils::Transform::InverseTransformPrediction(
+                train_result.validation_threshold,
+                train_result.transform_params,
+                m_modelConfig->use_tanh_transform,
+                m_modelConfig->use_standardization,
+                m_modelConfig->tanh_scaling_factor
+            );
+            
+            result.dynamic_positive_threshold = 0.0f;
+            
+            // Cache model if enabled
+            if (m_enableCaching && m_modelConfig->reuse_previous_model) {
+                m_modelCache.CacheModel(*m_model, train_result.transform_params,
+                                       result.prediction_threshold_scaled,
+                                       result.prediction_threshold_original,
+                                       result.dynamic_positive_threshold,
+                                       fold_number);
+            }
+        }
+        
+        // Make predictions if model is valid
+        if (!result.model_learned_nothing) {
+            std::vector<float> X_test_vec(X_test.data(), X_test.data() + result.n_test_samples * num_features);
+            auto pred_result = m_model->Predict(X_test_vec, result.n_test_samples, num_features);
+            
+            if (pred_result.success) {
+                // Inverse transform predictions
+                std::vector<float> predictions_original;
+                predictions_original.reserve(pred_result.predictions.size());
+                
+                TransformParams params = {result.mean_scale, result.std_scale, 
+                                        m_modelConfig->tanh_scaling_factor};
+                
+                for (float pred : pred_result.predictions) {
+                    float original = utils::Transform::InverseTransformPrediction(
+                        pred, params,
+                        m_modelConfig->use_tanh_transform,
+                        m_modelConfig->use_standardization,
+                        m_modelConfig->tanh_scaling_factor
+                    );
+                    predictions_original.push_back(original);
+                }
+                
+                // Calculate trading metrics
+                metrics::PerformanceMetrics::CalculateTradingMetrics(
+                    predictions_original, y_test,
+                    result.prediction_threshold_original,
+                    result.hit_rate, result.avg_return_on_signals,
+                    result.avg_predicted_return_on_signals,  // Using as avg_loss temporarily
+                    result.signal_sum  // Using as profit_factor temporarily
+                );
+                
+                // Extract proper metrics
+                result.n_signals = 0;
+                result.signal_sum = 0.0f;
+                std::vector<float> returns_on_signals;
+                
+                for (size_t i = 0; i < predictions_original.size(); ++i) {
+                    if (predictions_original[i] > result.prediction_threshold_original &&
+                        predictions_original[i] > result.dynamic_positive_threshold) {
+                        result.n_signals++;
+                        result.signal_sum += y_test[i];
+                        returns_on_signals.push_back(y_test[i]);
+                    }
+                }
+                
+                if (result.n_signals > 0) {
+                    result.signal_rate = (float)result.n_signals / predictions_original.size();
+                    result.avg_return_on_signals = result.signal_sum / result.n_signals;
+                    result.median_return_on_signals = utils::Statistics::CalculateMedian(returns_on_signals);
+                    result.std_return_on_signals = utils::Statistics::CalculateStdDev(
+                        returns_on_signals, result.avg_return_on_signals);
+                }
+            }
+        } else {
+            // No model available - no trading
+            std::cout << "Skipping predictions - model failed to learn and no cached model available" << std::endl;
+            result.n_signals = 0;
+            result.signal_sum = 0.0f;
+            result.signal_rate = 0.0f;
+            result.hit_rate = 0.0f;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error in ProcessSingleFold: " << e.what() << std::endl;
+        result.model_learned_nothing = true;
+    }
+    
+    return result;
+}
+
+std::vector<float> SimulationEngine::ExtractFeatures(int start_row, int end_row) {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        throw std::runtime_error("No data available");
+    }
+    
+    const chronosflow::AnalyticsDataFrame* dataFrame = m_timeSeriesWindow->GetDataFrame();
+    if (!dataFrame) {
+        throw std::runtime_error("DataFrame is null");
+    }
+    
+    int num_samples = end_row - start_row;
+    int num_features = m_modelConfig->feature_columns.size();
+    std::vector<float> features(num_samples * num_features);
+    
+    // Get the Arrow table once - CRITICAL performance fix
+    auto table = dataFrame->get_cpu_table();
+    if (!table) {
+        throw std::runtime_error("Unable to get CPU table");
+    }
+    
+    // Extract each feature column
+    for (size_t feat_idx = 0; feat_idx < m_modelConfig->feature_columns.size(); ++feat_idx) {
+        const std::string& feature_name = m_modelConfig->feature_columns[feat_idx];
+        
+        // Get column data from table
+        auto column = table->GetColumnByName(feature_name);
+        if (!column) {
+            throw std::runtime_error("Column not found: " + feature_name);
+        }
+        
+        // Extract values using GetScalar (like the old working code)
+        for (int i = 0; i < num_samples; ++i) {
+            auto scalar_result = column->GetScalar(start_row + i);
+            if (scalar_result.ok()) {
+                auto scalar = scalar_result.ValueOrDie();
+                if (scalar->is_valid) {
+                    float value = 0.0f;
+                    // Handle different Arrow types
+                    if (scalar->type->id() == arrow::Type::DOUBLE) {
+                        value = static_cast<float>(std::static_pointer_cast<arrow::DoubleScalar>(scalar)->value);
+                    } else if (scalar->type->id() == arrow::Type::FLOAT) {
+                        value = std::static_pointer_cast<arrow::FloatScalar>(scalar)->value;
+                    } else if (scalar->type->id() == arrow::Type::INT64) {
+                        value = static_cast<float>(std::static_pointer_cast<arrow::Int64Scalar>(scalar)->value);
+                    } else if (scalar->type->id() == arrow::Type::INT32) {
+                        value = static_cast<float>(std::static_pointer_cast<arrow::Int32Scalar>(scalar)->value);
+                    }
+                    features[i * num_features + feat_idx] = value;
+                } else {
+                    features[i * num_features + feat_idx] = 0.0f;  // Handle null values
+                }
+            } else {
+                features[i * num_features + feat_idx] = 0.0f;  // Handle error cases
+            }
+        }
+    }
+    
+    return features;
+}
+
+std::vector<float> SimulationEngine::ExtractTarget(int start_row, int end_row) {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        throw std::runtime_error("No data available");
+    }
+    
+    const chronosflow::AnalyticsDataFrame* dataFrame = m_timeSeriesWindow->GetDataFrame();
+    if (!dataFrame) {
+        throw std::runtime_error("DataFrame is null");
+    }
+    
+    int num_samples = end_row - start_row;
+    std::vector<float> target(num_samples);
+    
+    // Get target column
+    auto table = dataFrame->get_cpu_table();
+    auto column = table->GetColumnByName(m_modelConfig->target_column);
+    if (!column) {
+        throw std::runtime_error("Target column not found: " + m_modelConfig->target_column);
+    }
+    
+    // Extract values using GetScalar (like the old working code)
+    for (int i = 0; i < num_samples; ++i) {
+        auto scalar_result = column->GetScalar(start_row + i);
+        if (scalar_result.ok()) {
+            auto scalar = scalar_result.ValueOrDie();
+            if (scalar->is_valid) {
+                float value = 0.0f;
+                // Handle different Arrow types
+                if (scalar->type->id() == arrow::Type::DOUBLE) {
+                    value = static_cast<float>(std::static_pointer_cast<arrow::DoubleScalar>(scalar)->value);
+                } else if (scalar->type->id() == arrow::Type::FLOAT) {
+                    value = std::static_pointer_cast<arrow::FloatScalar>(scalar)->value;
+                } else if (scalar->type->id() == arrow::Type::INT64) {
+                    value = static_cast<float>(std::static_pointer_cast<arrow::Int64Scalar>(scalar)->value);
+                } else if (scalar->type->id() == arrow::Type::INT32) {
+                    value = static_cast<float>(std::static_pointer_cast<arrow::Int32Scalar>(scalar)->value);
+                }
+                target[i] = value;
+            } else {
+                target[i] = 0.0f;  // Handle null values
+            }
+        } else {
+            target[i] = 0.0f;  // Handle error cases
+        }
+    }
+    
+    return target;
+}
+
+int SimulationEngine::CalculateMaxFolds() const {
+    if (!m_timeSeriesWindow || !m_timeSeriesWindow->HasData()) {
+        return 0;
+    }
+    
+    const chronosflow::AnalyticsDataFrame* dataFrame = m_timeSeriesWindow->GetDataFrame();
+    if (!dataFrame) {
+        return 0;
+    }
+    
+    int64_t num_rows = dataFrame->num_rows();
+    
+    // Calculate how many folds fit in the data
+    int required_per_fold = m_walkForwardConfig.train_size + 
+                           m_walkForwardConfig.train_test_gap + 
+                           m_walkForwardConfig.test_size;
+    
+    int available_rows = num_rows - m_walkForwardConfig.initial_offset;
+    if (available_rows <= required_per_fold) {
+        return 0;
+    }
+    
+    // Calculate based on step size
+    int max_folds = 1 + (available_rows - required_per_fold) / m_walkForwardConfig.fold_step;
+    
+    // Adjust for start fold offset
+    max_folds = m_walkForwardConfig.start_fold + max_folds - 1;
+    
+    return max_folds;
+}
+
+} // namespace simulation

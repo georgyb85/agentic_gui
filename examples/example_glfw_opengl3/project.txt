@@ -1,0 +1,24 @@
+this project is a dearimgui trading simulation engine. it has several components. one of them is chronosflow library that is used to read data from disk in very specific format and converting its specific timestamps to unix timestamps, and uses apache arrow to manipualte and align data. 
+the typical use case: user opens "time series window" and loads a csv file there - containing indicators with timestamps, that window plots every individual indicator and additionally a window shows histogram of an indicator. indicators will be used to build a predictive model. then user opens "ohlcv chart" window and loads txt file containing respective ohlcv data for these indicators (matching timestamps) - this data will be used for trading simulation. note that indicators can be saved to remote questdb server, they can also be loaded from remote questdb server. then user opens "trading simulation" window and sets hyperparameters for xgboost model and sets data split for walkforward test. so given loaded indicators and indexes split for walkfoward, user chooses target indicator and features and makes different runs with different hyperparameters. each run produces predictions for each bar and thresholds for each fold in a walkforward simulation. and various accuracy and performance statistics are measures for each fold and each run. 
+
+then user opens "trade simulation" window, that uses saved predictions and threshold for individual runs, loaded ohlcv data and has set of its own hyperparameters for the simulation, once simulation is run, performance metrics are displayed. 
+
+the complete system runs on my laptop with archived market data and indicators. my plan is to move it online, via distributed system - some nodes will collect market data, some nodes will do gpu training and model building and some nodes will do training. 
+
+for that i made a separate drogon project in folder "backend" - review it. it actually has md files describing it. it has connectors to exchanges and multiple threads that monitor exchanges and update market data. in future it will also generate indicators from live market data and train models, similarty to what we do in walkforward simulation on historical data, but live: perhaps, retrains a model every midnight on past 20days market data/indicators, trades with this model following day and retrains at midnight again and so on.
+
+i also have web version("frontend") that mimics my dear imgui interface(with some additional views for monitoring servers): /mnt/c/src/agentic_gui/imgui/examples/example_glfw_opengl3/trading-dashboard/
+
+my endgoal is to have live trading web interface with online reporting and saved backtest, so user can always view historical performance of the model he's currently running. 
+
+i want you to write a detailed step by step plan for this project into separate md file. here's how i view it (corect where needed and improve - likely it's suboptimal!):
+
+-since i already can export indicators saved on my computer to questdbm frontend (web interface), backend (the drogon project) should have an endpoint that on some command from a frontend reads specific questdb table with inidicators and returns this data (perhaps with some additional calculated metrics for efficiency) to the frontend 
+
+-frontend displays plots for these indicators and histograms, similar to what we got in dear imgui interface
+
+-once indicators are read by frontend, user can set hyperparameters for the walkforward model and send serialized parameters to the backend (the drogon project) - it should have a controller that runs that code, copied from my dear imgui and leveraging cuda for xgboost model. it should save each runs output (thresholds, predictions) to questdb and metadata (hyperparameters, metrics) to postgres db. alternatively, as the first step we may initially add functionality to dear imgui project to write this output runs to questdb and metadata to postgres db from my laptop, so frontend only gets this data from another backend drogon controller(which internally pulls this data from databases and passes to the frontend)
+
+-once the walkforward "run" is read or calculated and saved, user may run trading simulation - load run's output and metadata into trading simulation, set trading simulation hyperparameters in web gui (similar to how it's done in dear imgui) and run a simulation. simulation's parameters and results and performance metrics shall be saved to databases - questdb and postgres, via backend (drogon controller)
+
+

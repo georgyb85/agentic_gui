@@ -1,0 +1,366 @@
+#pragma once
+
+#include "imgui.h"
+#include "implot.h"
+#include "analytics_dataframe.h"
+#include <string>
+#include <vector>
+#include <memory>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <future>
+#include <map>
+#include <chrono>
+
+// XGBoost includes
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable: 4100 4127 4244 4267 4458)
+#endif
+extern "C" {
+    #include <xgboost/c_api.h>
+}
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
+
+// Forward declare TimeSeriesWindow
+class TimeSeriesWindow;
+
+// Helper structure to hold transformation parameters
+struct TransformParams {
+    float mean = 0.0f;
+    float std_dev = 1.0f;
+    float scaling_factor = 0.001f;
+};
+
+// Comprehensive configuration for complete model reproducibility
+struct ModelRunConfiguration {
+    // Data specification
+    std::string source_data_hash;  // Hash of source data for validation
+    int data_rows_available;       // Total rows in source at time of run
+    
+    // Data split parameters (exact row indices)
+    int train_start_row;
+    int train_end_row;
+    int test_start_row;
+    int test_end_row;
+    float val_split_ratio;  // For splitting train into train/val
+    
+    // Feature engineering
+    std::vector<std::string> feature_columns;
+    std::string target_column;
+    
+    // Data transformation
+    bool use_standardization = false;
+    bool use_tanh_transform = true;
+    float tanh_scaling_factor = 0.001f;
+    
+    // XGBoost hyperparameters
+    float learning_rate = 0.01f;
+    int max_depth = 4;
+    float min_child_weight = 10.0f;
+    float subsample = 0.8f;
+    float colsample_bytree = 0.7f;
+    float lambda = 2.0f;
+    int num_boost_round = 2000;
+    int early_stopping_rounds = 50;
+    int min_boost_rounds = 100;
+    
+    // Execution parameters
+    int random_seed = 43;  // Fixed seed for reproducibility
+    std::string tree_method = "hist";
+    std::string objective = "reg:squarederror";
+    std::string device = "cuda";  // Will fallback to CPU if not available
+    
+    // Validation methods
+    bool IsValid() const {
+        return !feature_columns.empty() && 
+               !target_column.empty() &&
+               train_start_row >= 0 &&
+               train_end_row > train_start_row &&
+               test_start_row >= train_end_row &&
+               test_end_row > test_start_row &&
+               val_split_ratio > 0.0f && val_split_ratio < 1.0f;
+    }
+    
+    bool IsCompatibleWith(int available_rows) const {
+        return test_end_row <= available_rows;
+    }
+    
+    // Create from legacy SimulationConfig
+    static ModelRunConfiguration FromSimulationConfig(const struct SimulationConfig& config,
+                                                      int train_start, int train_end,
+                                                      int test_start, int test_end);
+};
+
+struct SimulationConfig {
+    std::vector<std::string> feature_columns;
+    std::string target_column;
+    float learning_rate = 0.01f;
+    int max_depth = 4;
+    float min_child_weight = 10.0f;
+    float subsample = 0.8f;
+    float colsample_bytree = 0.7f;
+    float lambda = 2.0f;
+    int num_boost_round = 2000;
+    int early_stopping_rounds = 50;
+    int min_boost_rounds = 100;  // Minimum iterations to ensure quality
+    bool force_minimum_training = true;  // Force minimum iterations even if no improvement
+    float val_split_ratio = 0.8f;
+    
+    // Transformation options
+    bool use_standardization = false;  // Whether to standardize target
+    bool use_tanh_transform = true;    // Whether to use tanh transformation (like Python)
+    float tanh_scaling_factor = 0.001f; // Scaling factor for tanh transformation
+    int train_test_gap = 9;             // Gap in bars between train and test sets (default 9 like old code)
+    
+    // Data split configuration
+    int train_size = 10000;            // Number of bars for training (was hardcoded as 16000-6000)
+    int test_size = 200;               // Number of bars for testing
+    int fold_step = 200;               // Step size between folds
+    int start_fold = 50;               // Starting fold number (was hardcoded as 50)
+    int end_fold = -1;                 // Ending fold number (-1 means auto-calculate based on data)
+    int initial_offset = 6000;        // Initial offset in data (was hardcoded as 6000)
+    
+    
+    // Model reuse settings
+    bool reuse_previous_model = false;  // Reuse last successful model when current fold doesn't learn
+};
+
+struct FoldResult {
+    int fold_number;
+    int train_start, train_end;
+    int test_start, test_end;
+    int n_train_samples;
+    int n_val_samples;
+    int n_test_samples;
+    int best_iteration;
+    float best_score;
+    bool model_learned_nothing;  // Flag for when model doesn't improve from random init
+    bool used_cached_model;      // Flag for when we used a previously cached model
+    float prediction_threshold_scaled;
+    float prediction_threshold_original;
+    float dynamic_positive_threshold;
+    float mean_scale, std_scale;
+    int n_signals;
+    float signal_sum;
+    float signal_rate;
+    float avg_return_on_signals;
+    float median_return_on_signals;
+    float std_return_on_signals;
+    float hit_rate;
+    float avg_predicted_return_on_signals;
+    float running_sum;
+    
+    // Store complete configuration for this fold
+    ModelRunConfiguration fold_configuration;
+    
+    // Cached string representations for table display
+    mutable std::string fold_str;
+    mutable std::string signals_str;
+    mutable std::string rate_str;
+    mutable std::string return_str;
+    mutable std::string hit_str;
+    mutable std::string sum_str;
+    mutable bool cache_dirty = true;
+    
+    void UpdateCache() const {
+        if (!cache_dirty) return;
+        
+        fold_str = std::to_string(fold_number);
+        signals_str = std::to_string(n_signals);
+        
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "%.2f%%", signal_rate * 100.0f);
+        rate_str = buffer;
+        
+        snprintf(buffer, sizeof(buffer), "%.6f", avg_return_on_signals);
+        return_str = buffer;
+        
+        snprintf(buffer, sizeof(buffer), "%.2f%%", hit_rate * 100.0f);
+        hit_str = buffer;
+        
+        snprintf(buffer, sizeof(buffer), "%.6f", running_sum);
+        sum_str = buffer;
+        
+        cache_dirty = false;
+    }
+};
+
+struct SimulationRun {
+    std::string name;
+    std::string config_description;
+    SimulationConfig config;  // Store full configuration for copy/paste
+    std::vector<FoldResult> foldResults;
+    std::vector<double> profitPlotX;
+    std::vector<double> profitPlotY;
+    ImVec4 plotColor;
+    std::chrono::system_clock::time_point startTime;
+    bool completed;
+};
+
+class SimulationWindow {
+public:
+    SimulationWindow();
+    ~SimulationWindow();
+    
+    void Draw();
+    bool IsVisible() const { return m_isVisible; }
+    void SetVisible(bool visible) { m_isVisible = visible; }
+    
+    void SetTimeSeriesWindow(TimeSeriesWindow* tsWindow) { m_timeSeriesWindow = tsWindow; }
+    
+private:
+    void DrawConfigurationTabs();
+    void DrawFeatureSelection();
+    void DrawTargetSelection();
+    void DrawHyperparameters();
+    void DrawSimulationControls();
+    void DrawResults();
+    void DrawProgressBar();
+    void DrawResultsTable(int runIndex = -1);
+    void DrawProfitPlot();
+    
+    // Multi-run support
+    std::string GenerateRunName();
+    std::string GenerateConfigDescription();
+    ImVec4 GetRunColor(int runIndex);
+    
+    void StartSimulation();
+    void StopSimulation();
+    void ResetSimulation();
+    
+    void UpdateColumnLists();
+    void RunSimulationThread();
+    int CalculateMaxFolds(int64_t numRows, const SimulationConfig& config) const;
+    
+    // XGBoost simulation methods (from xg.txt)
+    void checkXGBoostError(int status, const std::string& context);
+    std::vector<float> extractColumnData(const std::string& columnName, int startRow, int endRow);
+    float calculateMedian(std::vector<float>& values);
+    float calculateStdDev(const std::vector<float>& values, float mean);
+    float calculateQuantile(std::vector<float> values, float quantile);
+    FoldResult testSingleFold(int train_start, int train_end, int test_start, int test_end);
+    
+    
+    // Model caching methods
+    void CacheModel(BoosterHandle booster, const TransformParams& params, 
+                   float pred_thresh_scaled, float pred_thresh_orig, 
+                   float dyn_pos_thresh, int fold_number);
+    BoosterHandle LoadCachedModel();
+    
+    // Window state
+    bool m_isVisible;
+    TimeSeriesWindow* m_timeSeriesWindow;
+    
+    // Configuration
+    SimulationConfig m_config;  // Current GUI configuration
+    SimulationConfig m_runningConfig;  // Configuration snapshot for running simulation
+    
+    // Available columns
+    std::vector<std::string> m_availableFeatureColumns;
+    std::vector<std::string> m_availableTargetColumns;
+    std::vector<bool> m_selectedFeatures;
+    std::vector<std::pair<std::string, bool>> m_sortedFeatures; // Alphabetically sorted features with selection state
+    int m_selectedTargetIndex;
+    
+    // Simulation state
+    std::atomic<bool> m_isRunning;
+    std::atomic<bool> m_shouldStop;
+    std::atomic<int> m_currentFold;
+    std::atomic<int> m_totalFolds;
+    std::thread m_simulationThread;
+    
+    // Multi-run results
+    std::mutex m_resultsMutex;
+    std::vector<SimulationRun> m_simulationRuns;
+    int m_currentRunIndex;
+    bool m_resultsUpdated;
+    
+    // UI state
+    float m_configPanelHeight;
+    float m_resultsPanelHeight;
+    bool m_autoScrollTable;
+    bool m_autoFitPlot;
+    
+    // Performance optimization
+    static constexpr int MAX_VISIBLE_RESULTS = 200;
+    
+    // Cached model for reuse
+    struct CachedModel {
+        std::vector<char> model_buffer;  // Serialized XGBoost model
+        TransformParams transform_params;  // Transformation parameters from training
+        float prediction_threshold_scaled;
+        float prediction_threshold_original;
+        float dynamic_positive_threshold;
+        int source_fold;  // Which fold this model came from
+        bool is_valid;
+        
+        CachedModel() : is_valid(false), source_fold(-1) {}
+    };
+    CachedModel m_cachedModel;
+    
+    
+    // UI constants
+    static constexpr float CONFIG_PANEL_MIN_HEIGHT = 300.0f;
+    static constexpr float RESULTS_PANEL_MIN_HEIGHT = 200.0f;
+    
+    // Copy/Paste state
+    bool m_hasCopiedFeatures;
+    std::vector<std::string> m_copiedFeatureColumns;
+    std::string m_copiedTargetColumn;
+    bool m_hasCopiedHyperparameters;
+    SimulationConfig m_copiedConfig;  // Only hyperparameters portion
+    
+    // Test Model state
+    struct TestModelState {
+        // Configuration source tracking
+        enum ConfigSource {
+            MANUAL,      // User manually entered values
+            FROM_FOLD,   // Copied from a simulation fold
+            DEFAULT      // Default values
+        };
+        ConfigSource config_source = DEFAULT;
+        
+        // If FROM_FOLD, which run and fold it came from
+        std::string source_run_name;
+        int source_fold_number = -1;
+        
+        // Current configuration (can be from fold or manual)
+        ModelRunConfiguration current_config;
+        
+        // Legacy fields for backward compatibility (will be removed later)
+        int train_start_row = 6000;
+        int train_end_row = 16000;
+        int test_start_row = 16000;
+        int test_end_row = 16200;
+        float trading_threshold = 0.0f;  // Will be calculated
+        bool threshold_manually_set = false;
+        
+        // Results
+        BoosterHandle trained_model = nullptr;
+        std::vector<std::pair<std::string, float>> feature_importance;
+        std::vector<float> test_predictions;
+        std::vector<float> test_actuals;
+        float accuracy_above_threshold = 0.0f;
+        int signals_generated = 0;
+        float hit_rate = 0.0f;
+        bool model_trained = false;
+        TransformParams transform_params;
+        bool transform_params_manually_set = false;  // Flag to preserve transformation parameters from fold
+        
+        // Methods
+        void SetFromFold(const FoldResult& fold, const SimulationRun& run);
+        void ResetToManual();
+        bool ValidateConfiguration(int available_data_rows) const;
+    };
+    TestModelState m_testModelState;
+    
+    // Test Model methods
+    void DrawTestModel();
+    void RunTestModel();
+    void PlotFeatureImportance();
+    void PlotPredictionScatter();
+};

@@ -1,0 +1,58 @@
+# Include this file in your main Makefile to add simulation components
+
+# Simulation core components
+SOURCES += simulation/SimulationTypes.cpp
+SOURCES += simulation/ModelFactory.cpp
+SOURCES += simulation/PerformanceMetrics.cpp
+SOURCES += simulation/SimulationEngine.cpp
+SOURCES += simulation/InitializeModels.cpp
+SOURCES += simulation/SimulationWindowNew.cpp
+SOURCES += simulation/ThresholdCalculator.cpp
+
+# Model implementations
+SOURCES += simulation/models/XGBoostModel.cpp
+SOURCES += simulation/models/XGBoostWidget.cpp
+# SOURCES += simulation/models/LinearRegressionModel.cpp  # When implemented
+# SOURCES += simulation/models/NeuralNetworkModel.cpp     # When implemented
+
+# UI components
+SOURCES += simulation/ui/UniversalConfigWidget.cpp
+SOURCES += simulation/ui/SimulationResultsWidget.cpp
+SOURCES += simulation/ui/SimulationControlsWidget.cpp
+
+# Add to include path
+CXXFLAGS += -I./simulation
+
+# For Visual Studio, add these to your .vcxproj file:
+# <ItemGroup>
+#   <ClCompile Include="simulation\SimulationTypes.cpp" />
+#   <ClCompile Include="simulation\ModelFactory.cpp" />
+#   <ClCompile Include="simulation\PerformanceMetrics.cpp" />
+#   <ClCompile Include="simulation\SimulationEngine.cpp" />
+#   <ClCompile Include="simulation\InitializeModels.cpp" />
+#   <ClCompile Include="simulation\SimulationWindowNew.cpp" />
+#   <ClCompile Include="simulation\ThresholdCalculator.cpp" />
+#   <ClCompile Include="simulation\models\XGBoostModel.cpp" />
+#   <ClCompile Include="simulation\models\XGBoostWidget.cpp" />
+#   <ClCompile Include="simulation\ui\UniversalConfigWidget.cpp" />
+#   <ClCompile Include="simulation\ui\SimulationResultsWidget.cpp" />
+#   <ClCompile Include="simulation\ui\SimulationControlsWidget.cpp" />
+# </ItemGroup>
+# 
+# <ItemGroup>
+#   <ClInclude Include="simulation\SimulationTypes.h" />
+#   <ClInclude Include="simulation\ISimulationModel_v2.h" />
+#   <ClInclude Include="simulation\XGBoostConfig.h" />
+#   <ClInclude Include="simulation\SimulationUtils.h" />
+#   <ClInclude Include="simulation\ThresholdCalculator.h" />
+#   <ClInclude Include="simulation\PerformanceMetrics.h" />
+#   <ClInclude Include="simulation\SimulationEngine.h" />
+#   <ClInclude Include="simulation\SimulationWindowNew.h" />
+#   <ClInclude Include="simulation\models\XGBoostModel.h" />
+#   <ClInclude Include="simulation\models\XGBoostWidget.h" />
+#   <ClInclude Include="simulation\models\LinearRegressionModel.h" />
+#   <ClInclude Include="simulation\models\NeuralNetworkModel.h" />
+#   <ClInclude Include="simulation\ui\UniversalConfigWidget.h" />
+#   <ClInclude Include="simulation\ui\SimulationResultsWidget.h" />
+#   <ClInclude Include="simulation\ui\SimulationControlsWidget.h" />
+# </ItemGroup>

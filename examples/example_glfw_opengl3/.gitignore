@@ -1,0 +1,14 @@
+# Build outputs
+Release/
+Debug/
+x64/
+
+# IDE folders
+.vscode/
+.vs/
+
+# Excluded folders
+for review/
+trading-dashboard/
+eigen-3.4.0/
+claude/

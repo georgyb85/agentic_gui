@@ -1,0 +1,145 @@
+Comprehensive Problem Description and Fix-It Plan
+Core Problem: Conflicting Logic and Unclear Responsibilities
+The root of the issue is a blurring of responsibilities between the generic chronosflow library and the specific TimeSeriesWindow UI.
+chronosflow's Role: It should be a robust, generic data loader. It needs to correctly handle any delimited file, with or without headers, and correctly parse whitespace-as-a-delimiter without making assumptions about column names like "Date" or "Time". Its job is to produce a clean arrow::Table.
+TimeSeriesWindow's Role: It is a specific application that expects a certain file format: a time series file with a header and a column named "Date". Its job is to use chronosflow to load the data and then build the necessary timestamps for plotting.
+The current implementation mixes these roles. The WhitespaceNormalizingInputStream tries to be too smart about headers, and the UI makes assumptions that chronosflow doesn't guarantee.
+The Fix-It Plan: A Clean Separation of Concerns
+We will refactor the code to adhere to this clean separation.
+The WhitespaceNormalizingInputStream must be simplified. It should do one thing and one thing only: normalize whitespace delimiters. It should not know or care about headers. This makes it a reusable, predictable component.
+Action 1: Simplify WhitespaceNormalizingInputStream
+File: dataframe_io.h and dataframe_io.cpp
+Change: Remove the entire "hybrid" logic from the stream. Revert WhitespaceNormalizingInputStream::Read to the high-performance, block-based version that treats all lines equally. The header line will be normalized just like any data line.
+Remove the header_processed_ member variable.
+The Read method becomes the simple, fast block-processor from our previous correct iteration.
+Action 2: Make Delimiter Detection Unambiguous
+File: dataframe_io.cpp
+Change: detect_delimiter should be decisive. The CSV parser's autogenerate_column_names is what handles header vs. no-header. The delimiter detection should be consistent.
+The Problem: The current detect_header function is called before normalization, but the parser runs after normalization. This is a logical disconnect.
+The Solution: The detect_header logic is flawed in this context. We should rely on the TSSBReadOptions::has_header flag provided by the user (TimeSeriesWindow). detect_header should be removed as it's unreliable across different file types and normalization schemes.
+Action 3: Fix read_tssb to be Generic
+File: dataframe_io.cpp
+Change: The read_tssb function should not automatically search for "date" or "time" columns. Its job is to load the file based on the TSSBReadOptions. The calling application is responsible for knowing its own schema.
+code
+C++
+// In dataframe_io.cpp -> read_tssb
+arrow::Result<AnalyticsDataFrame> DataFrameIO::read_tssb(
+    const std::string& file_path,
+    const TSSBReadOptions& options) {
+    
+    // ... (code to open file and detect delimiter) ...
+    
+    // If space delimiter is detected, wrap the input stream.
+    // The stream is now dumber and just normalizes everything.
+    if (delimiter == ' ') {
+        input = std::make_shared<WhitespaceNormalizingInputStream>(input);
+        delimiter = '\t'; 
+    }
+    
+    // Parse the stream. Use the has_header option provided by the caller.
+    ARROW_ASSIGN_OR_RAISE(auto table, parse_tssb_stream(input, delimiter, options.has_header));
+    
+    AnalyticsDataFrame df(std::move(table));
+    
+    // IMPORTANT: Set metadata ONLY if explicitly provided in options.
+    // The library should not guess.
+    if (!options.date_column.empty()) {
+        df.set_tssb_metadata(options.date_column, options.time_column);
+    }
+    
+    return df;
+}
+The UI knows what it wants. Let's make it responsible for configuring the load and post-processing the data.
+Action 4: Configure chronosflow Correctly
+File: TimeSeriesWindow.cpp -> LoadCSVFile
+Change: The UI must tell chronosflow exactly what to do. It knows the file has a header and it wants to find the "Date" and "Time" columns after loading.
+code
+C++
+// In TimeSeriesWindow.cpp -> LoadCSVFile
+void TimeSeriesWindow::LoadCSVFile(const std::string& filepath) {
+    // ...
+    m_loadingFuture = std::async(std::launch::async, [filepath]() {
+        chronosflow::TSSBReadOptions options;
+        options.auto_detect_delimiter = true;
+        // Tell the loader that the file DEFINITELY has a header.
+        options.has_header = true; 
+        
+        // Let the generic loader run. We will find the date/time columns later.
+        return chronosflow::DataFrameIO::read_tssb(filepath, options);
+    });
+}
+Action 5: Post-Process the DataFrame After Loading
+File: TimeSeriesWindow.cpp -> Draw()
+Change: After the future completes and we have a valid AnalyticsDataFrame, we perform the application-specific logic. We find the "Date" column and set the metadata.
+code
+C++
+// In TimeSeriesWindow.cpp -> Draw()
+// Inside the check for m_loadingFuture.wait_for(...)
+if (result.ok()) {
+    auto df = std::make_unique<chronosflow::AnalyticsDataFrame>(result.MoveValueUnsafe());
+
+    // --- APPLICATION-SPECIFIC LOGIC ---
+    // The UI is now responsible for interpreting the schema.
+    const auto& columns = df->column_names();
+    auto date_it = std::find_if(columns.begin(), columns.end(), 
+        [](const std::string& name){ return strcasecmp(name.c_str(), "Date") == 0; });
+    auto time_it = std::find_if(columns.begin(), columns.end(), 
+        [](const std::string& name){ return strcasecmp(name.c_str(), "Time") == 0; });
+
+    if (date_it == columns.end()) {
+        // ERROR: The specific file we need is missing the 'Date' column.
+        m_hasError = true;
+        m_errorMessage = "Required 'Date' column not found in file.";
+        m_isLoading = false;
+        return; // Abort processing
+    }
+    
+    // We found the columns, now set the metadata on the DataFrame.
+    std::string date_col_name = *date_it;
+    std::string time_col_name = (time_it != columns.end()) ? *time_it : "";
+    df->set_tssb_metadata(date_col_name, time_col_name);
+    // --- END APPLICATION-SPECIFIC LOGIC ---
+    
+    m_dataFrame = std::move(df);
+    m_columnHeaders = m_dataFrame->column_names();
+    // ... rest of the UI setup ...
+}
+Action 6: Fix UpdatePlotData to be Robust
+File: TimeSeriesWindow.cpp
+Change: The with_unix_timestamp method now relies on the metadata we just set. This will work correctly. We also need to handle the case where a numeric column might be read as a different type (e.g., int64 instead of float) and cast it.
+code
+C++
+// In TimeSeriesWindow.cpp -> UpdatePlotData
+// ...
+// Get views of the selected indicator and the unix timestamps
+auto values_res = m_dataFrame->get_column_view<double>(m_selectedIndicator);
+// NOTE: Chronosflow's `get_column_view` needs a type. If the data could be int, float,
+// or double, the UI layer needs to handle this. The most robust way is to cast.
+
+// A more robust way inside UpdatePlotData:
+auto table = m_dataFrame->get_cpu_table();
+auto values_col = table->GetColumnByName(m_selectedIndicator);
+arrow::compute::CastOptions cast_opts(arrow::compute::CastOptions::Safe(arrow::float64()));
+ARROW_ASSIGN_OR_RAISE(auto casted_values_datum, arrow::compute::Cast(values_col, cast_opts));
+auto casted_values_array = std::static_pointer_cast<arrow::DoubleArray>(casted_values_datum.make_array());
+const double* values_data = casted_values_array->raw_values();
+
+// ... then proceed with plotting `values_data` ...
+Summary for Claude Code
+You've built a powerful data loading library, chronosflow, and are integrating it into a TimeSeriesWindow UI. The integration has revealed a subtle but critical design issue: the line between the generic library and the specific application has been blurred, causing performance and correctness problems, especially with whitespace-delimited files that have headers.
+The Goal: Refactor the code to establish a clean separation of concerns.
+The Plan:
+Simplify chronosflow::WhitespaceNormalizingInputStream:
+Task: Revert its Read method to the high-performance, block-based processor that treats all lines (including the header) equally. It should simply normalize whitespace sequences ( or \t) into a single \t delimiter.
+Rationale: The stream's only job is to normalize delimiters. It should be "dumb" about file structure like headers. This makes it a fast, simple, and reusable component.
+Make chronosflow::DataFrameIO::read_tssb Generic:
+Task: Remove the detect_header logic and the automatic search for "Date"/"Time" columns from read_tssb. The function should strictly obey the TSSBReadOptions passed in by the caller, especially the has_header flag. It should only set date/time metadata if options.date_column is explicitly provided.
+Rationale: A library function should not make application-specific guesses about schema. This makes the library more predictable and broadly useful.
+Empower TimeSeriesWindow to Handle Its Specific Needs:
+Task: In TimeSeriesWindow::LoadCSVFile, configure the TSSBReadOptions to always set has_header = true, as this UI component requires it.
+Task: In TimeSeriesWindow::Draw, after the std::future returns a successfully loaded AnalyticsDataFrame, add new "post-processing" logic. This logic will inspect the DataFrame's column_names(), find the columns named "Date" and "Time" (case-insensitively), and then call df->set_tssb_metadata() with the discovered names. If a "Date" column is not found, it should set an error state.
+Rationale: This moves the application-specific logic (schema interpretation) out of the generic library and into the application layer where it belongs.
+Make Plotting Robust:
+Task: In TimeSeriesWindow::UpdatePlotData, before trying to get a ColumnView, explicitly cast the selected indicator column to double using arrow::compute::Cast. This ensures that data of any numeric type (int, float, etc.) can be plotted correctly.
+Rationale: This handles schema variations gracefully and prevents crashes if a column doesn't have the exact hardcoded type.
+By following this plan, you will achieve a clean, performant, and robust architecture where each component has a clear and simple responsibility.

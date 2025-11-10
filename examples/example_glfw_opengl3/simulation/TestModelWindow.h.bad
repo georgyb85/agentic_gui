@@ -1,0 +1,83 @@
+#pragma once
+
+#include "SimulationTypes.h"
+#include "ISimulationModel_v2.h"
+#include <memory>
+#include <string>
+
+// Forward declarations
+class TimeSeriesWindow;
+
+namespace simulation {
+
+// Window for testing a model on a specific fold's data
+// This allows detailed examination of how the model performs on a particular fold
+class TestModelWindow {
+public:
+    TestModelWindow();
+    ~TestModelWindow();
+    
+    // Main draw function
+    void Draw();
+    
+    // Set visibility
+    void SetVisible(bool visible) { m_isVisible = visible; }
+    bool IsVisible() const { return m_isVisible; }
+    
+    // Set data source
+    void SetDataSource(TimeSeriesWindow* tsWindow) { m_timeSeriesWindow = tsWindow; }
+    
+    // Load fold configuration from a simulation run
+    void SetFromFold(const FoldResult& fold, const SimulationRun& run);
+    
+    // Clear current configuration
+    void Clear();
+    
+private:
+    // Run the test model
+    void RunTestModel();
+    
+    // Display results
+    void DrawConfiguration();
+    void DrawResults();
+    
+    // State
+    bool m_isVisible;
+    bool m_hasConfiguration;
+    bool m_hasResults;
+    
+    // Configuration from fold
+    struct TestConfig {
+        FoldResult sourceFold;
+        // Instead of storing full SimulationRun, just store needed fields
+        std::string sourceRunName;
+        std::string sourceModelType;
+        int trainStart;
+        int trainEnd;
+        int testStart;
+        int testEnd;
+        float originalThreshold;
+        std::string modelType;
+        std::any modelConfig;
+    } m_config;
+    
+    // Results
+    struct TestResults {
+        int signalsGenerated;
+        float hitRate;
+        float accuracyAboveThreshold;
+        float totalReturn;
+        std::vector<float> predictions;
+        std::vector<float> actuals;
+        bool success;
+        std::string errorMessage;
+    } m_results;
+    
+    // Model
+    std::unique_ptr<ISimulationModel> m_model;
+    
+    // Data source
+    TimeSeriesWindow* m_timeSeriesWindow;
+};
+
+} // namespace simulation

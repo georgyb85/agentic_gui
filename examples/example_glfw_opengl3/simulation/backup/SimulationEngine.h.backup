@@ -1,0 +1,99 @@
+#pragma once
+
+#include "SimulationTypes.h"
+#include "ISimulationModel_v2.h"
+#include <memory>
+#include <functional>
+#include <atomic>
+#include <thread>
+
+// Forward declarations
+class TimeSeriesWindow;
+
+namespace simulation {
+
+// Callback types for progress reporting
+using ProgressCallback = std::function<void(int current_fold, int total_folds)>;
+using FoldCompleteCallback = std::function<void(const FoldResult& result)>;
+using SimulationCompleteCallback = std::function<void(const SimulationRun& run)>;
+
+class SimulationEngine {
+public:
+    SimulationEngine();
+    ~SimulationEngine();
+    
+    // Set data source
+    void SetDataSource(TimeSeriesWindow* tsWindow) { m_timeSeriesWindow = tsWindow; }
+    
+    // Configuration
+    void SetModel(std::unique_ptr<ISimulationModel> model);
+    void SetModelConfig(std::unique_ptr<ModelConfigBase> config);
+    void SetWalkForwardConfig(const WalkForwardConfig& config);
+    
+    // Callbacks for UI updates
+    void SetProgressCallback(ProgressCallback callback) { m_progressCallback = callback; }
+    void SetFoldCompleteCallback(FoldCompleteCallback callback) { m_foldCallback = callback; }
+    void SetCompleteCallback(SimulationCompleteCallback callback) { m_completeCallback = callback; }
+    
+    // Simulation control
+    void StartSimulation();
+    void StopSimulation();
+    bool IsRunning() const { return m_isRunning.load(); }
+    
+    // Get current state
+    int GetCurrentFold() const { return m_currentFold.load(); }
+    int GetTotalFolds() const { return m_totalFolds.load(); }
+    const SimulationRun& GetCurrentRun() const { return m_currentRun; }
+    SimulationRun& GetCurrentRunMutable() { return m_currentRun; }
+    
+    // Model caching control
+    void EnableModelCaching(bool enable) { m_enableCaching = enable; }
+    
+    // Get current configuration
+    ModelConfigBase* GetModelConfig() const { return m_modelConfig.get(); }
+    
+private:
+    // Core simulation logic
+    void RunSimulationThread();
+    FoldResult ProcessSingleFold(
+        int train_start, int train_end,
+        int test_start, int test_end,
+        int fold_number
+    );
+    
+    // Data extraction
+    std::vector<float> ExtractFeatures(int start_row, int end_row);
+    std::vector<float> ExtractTarget(int start_row, int end_row);
+    
+    // Helper methods
+    int CalculateMaxFolds() const;
+    
+    // Data source
+    TimeSeriesWindow* m_timeSeriesWindow;
+    
+    // Model and configuration
+    std::unique_ptr<ISimulationModel> m_model;
+    std::unique_ptr<ModelConfigBase> m_modelConfig;
+    WalkForwardConfig m_walkForwardConfig;
+    
+    // Model caching
+    ModelCache m_modelCache;
+    bool m_enableCaching;
+    
+    // Current run state
+    SimulationRun m_currentRun;
+    
+    // Threading
+    std::thread m_simulationThread;
+    std::atomic<bool> m_isRunning;
+    std::atomic<bool> m_shouldStop;
+    std::atomic<int> m_currentFold;
+    std::atomic<int> m_totalFolds;
+    
+    // Callbacks
+    ProgressCallback m_progressCallback;
+    FoldCompleteCallback m_foldCallback;
+    SimulationCompleteCallback m_completeCallback;
+};
+
+} // namespace simulation

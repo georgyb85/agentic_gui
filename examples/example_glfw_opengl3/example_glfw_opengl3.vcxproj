@@ -1,0 +1,388 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build" ToolsVersion="14.0">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{4a1fb5ea-22f5-42a8-ab92-1d2df5d47fb9}</ProjectGuid>
+    <RootNamespace>example_glfw_opengl3</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <CudaToolkitCustomDir>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0</CudaToolkitCustomDir>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props"/>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props"/>
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.props"/>
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform"/>
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform"/>
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform"/>
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform"/>
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros"/>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\</IntDir>
+    <IncludePath>$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\</IntDir>
+    <IncludePath>$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\</IntDir>
+    <IncludePath>$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Configuration)\</IntDir>
+    <IncludePath>$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>..\libs\glfw\lib-vc2010-32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+      <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
+      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_86,sm_86;compute_89,sm_89</CodeGeneration>
+      <AdditionalOptions>-Xcompiler "/wd 4819 /std:c++20" --std=c++20 %(AdditionalOptions)</AdditionalOptions>
+      <Include>$(CudaToolkitIncludeDir)</Include>
+      <CudaRuntime>Static</CudaRuntime>
+      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>C:\src\BTCPredictor\xgboost\include;C:\src\vcpkg\installed\x64-windows\include;..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>C:\src\BTCPredictor\xgboost\lib;..\libs\glfw\lib-vc2010-64;C:\src\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+      <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
+      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_86,sm_86;compute_89,sm_89</CodeGeneration>
+      <AdditionalOptions>-Xcompiler "/wd 4819 /std:c++20" --std=c++20 %(AdditionalOptions)</AdditionalOptions>
+      <Include>$(CudaToolkitIncludeDir)</Include>
+      <CudaRuntime>Static</CudaRuntime>
+      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalLibraryDirectories>..\libs\glfw\lib-vc2010-32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+      <IgnoreSpecificDefaultLibraries>
+      </IgnoreSpecificDefaultLibraries>
+      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <AdditionalIncludeDirectories>C:\src\BTCPredictor\xgboost\include;C:\src\BTCPredictor\xgboost\include;C:\src\vcpkg\installed\x64-windows\include;..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <OpenMPSupport>true</OpenMPSupport>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalLibraryDirectories>C:\src\BTCPredictor\xgboost\lib;..\libs\glfw\lib-vc2010-64;C:\src\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+      <IgnoreSpecificDefaultLibraries>
+      </IgnoreSpecificDefaultLibraries>
+      <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_86,sm_86;compute_89,sm_89</CodeGeneration>
+      <AdditionalOptions>-Xcompiler "/wd 4819 /std:c++20" --std=c++20 %(AdditionalOptions)</AdditionalOptions>
+      <Include>$(CudaToolkitIncludeDir)</Include>
+      <CudaRuntime>Static</CudaRuntime>
+      <GenerateRelocatableDeviceCode>true</GenerateRelocatableDeviceCode>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\imgui.cpp"/>
+    <ClCompile Include="..\..\imgui_demo.cpp"/>
+    <ClCompile Include="..\..\imgui_draw.cpp"/>
+    <ClCompile Include="..\..\imgui_tables.cpp"/>
+    <ClCompile Include="..\..\imgui_widgets.cpp"/>
+    <ClCompile Include="..\..\misc\cpp\imgui_stdlib.cpp"/>
+    <ClCompile Include="..\..\backends\imgui_impl_glfw.cpp"/>
+    <ClCompile Include="..\..\backends\imgui_impl_opengl3.cpp"/>
+    <ClCompile Include="implot.cpp"/>
+    <ClCompile Include="implot_demo.cpp"/>
+    <ClCompile Include="implot_items.cpp"/>
+    <ClCompile Include="main.cpp"/>
+    <ClCompile Include="utils.cpp"/>
+    <ClCompile Include="implot_custom_plotters.cpp"/>
+    <ClCompile Include="candlestick_chart.cpp"/>
+    <ClCompile Include="TickerSelector.cpp"/>
+    <ClCompile Include="NewsWindow.cpp"/>
+    <ClCompile Include="TimeSeriesWindow.cpp"/>
+    <ClCompile Include="IndicatorBuilderWindow.cpp"/>
+    <ClCompile Include="HistogramWindow.cpp"/>
+    <ClCompile Include="fsca\FscaAnalyzer.cpp"/>
+    <ClCompile Include="hmm\HmmTargetCorrelation.cpp"/>
+    <ClCompile Include="hmm\HmmMemoryTest.cpp"/>
+    <ClCompile Include="FSCAWindow.cpp"/>
+    <ClCompile Include="HMMMemoryWindow.cpp"/>
+    <ClCompile Include="HMMTargetWindow.cpp"/>
+    <ClCompile Include="StationarityWindow.cpp"/>
+    <ClCompile Include="TradeSimulator.cpp"/>
+    <ClCompile Include="TradeSimulationWindow.cpp"/>
+    <ClCompile Include="stage1_metadata_writer.cpp"/>
+    <ClCompile Include="analytics_dataframe.cpp"/>
+    <ClCompile Include="dataframe_io.cpp"/>
+    <ClCompile Include="tssb_timestamp.cpp"/>
+    <ClCompile Include="feature_utils.cpp"/>
+    <ClCompile Include="BivarAnalysisWidget.cpp"/>
+    <ClCompile Include="ESSWindow.cpp"/>
+    <ClCompile Include="LFSWindow.cpp"/>
+    <ClCompile Include="lfs\lfs.cpp"/>
+    <ClCompile Include="lfs\lfs_data_reader.cpp"/>
+    <ClCompile Include="lfs\lfs_do_case.cpp"/>
+    <ClCompile Include="lfs\lfs_beta.cpp"/>
+    <ClCompile Include="lfs\lfs_weights.cpp"/>
+    <ClCompile Include="lfs\simplex.cpp"/>
+    <ClCompile Include="lfs\simplex_legacy.cpp"/>
+    <ClCompile Include="lfs\qsortd.cpp"/>
+    <ClCompile Include="lfs\rand32.cpp"/>
+    <ClCompile Include="lfs\part.cpp"/>
+    <ClCompile Include="lfs\lfs_globals.cpp"/>
+    <CudaCompile Include="lfs\lfs_cuda.cu"/>
+    <ClCompile Include="FeatureSelectorWidget.cpp"/>
+    <ClCompile Include="bivariate_analysis_exact.cpp"/>
+    <ClCompile Include="modern_algorithms.cpp"/>
+    <ClCompile Include="modern_discretizer.cpp"/>
+    <ClCompile Include="stepwise\enhanced_stepwise.cpp"/>
+    <ClCompile Include="stepwise\enhanced_stepwise_selector.cpp"/>
+    <ClCompile Include="stepwise\data_matrix.cpp"/>
+    <ClCompile Include="stepwise\cross_validator.cpp"/>
+    <ClCompile Include="stepwise\linear_quadratic_model.cpp"/>
+    <ClCompile Include="stepwise\monte_carlo_permutation_test.cpp"/>
+    <ClCompile Include="stepwise\modern_svd.cpp"/>
+    <ClCompile Include="stepwise\memory_pool.cpp"/>
+    <ClCompile Include="stepwise\stepwise_data_reader.cpp"/>
+    <ClCompile Include="stepwise\xgboost_config_widget.cpp"/>
+    <ClCompile Include="stepwise\xgboost_model.cpp"/>
+    <ClCompile Include="stepwise\linear_quadratic_model_wrapper.cpp"/>
+    <ClCompile Include="stepwise\enhanced_stepwise_v2.cpp"/>
+    <ClCompile Include="stepwise\enhanced_stepwise_selector_v2.cpp"/>
+    <ClCompile Include="simulation\SimulationWindowNew.cpp"/>
+    <ClCompile Include="simulation\SimulationTypes.cpp"/>
+    <ClCompile Include="simulation\ModelFactory.cpp"/>
+    <ClCompile Include="simulation\PerformanceMetrics.cpp"/>
+    <ClCompile Include="simulation\SimulationEngine.cpp"/>
+    <ClCompile Include="simulation\models\XGBoostModel.cpp"/>
+    <ClCompile Include="simulation\models\XGBoostWidget.cpp"/>
+    <ClCompile Include="simulation\ui\UniversalConfigWidget.cpp"/>
+    <ClCompile Include="simulation\ui\SimulationResultsWidget.cpp"/>
+    <ClCompile Include="simulation\ui\SimulationResultsWidget_v2.cpp"/>
+    <ClCompile Include="simulation\ui\SimulationControlsWidget.cpp"/>
+    <ClCompile Include="simulation\TestModelWindow.cpp"/>
+    <ClCompile Include="simulation\ThresholdCalculator.cpp"/>
+    <ClCompile Include="simulation\PerformanceStressTests.cpp"/>
+    <ClCompile Include="QuestDbDataFrameGateway.cpp"/>
+    <ClCompile Include="QuestDbExports.cpp"/>
+    <ClCompile Include="QuestDbImports.cpp"/>
+    <ClCompile Include="hmm\HmmModel.cpp"/><ClCompile Include="stationarity\MeanBreakTest.cpp"/>
+    <ClCompile Include="RunConfigSerializer.cpp"/>
+    <ClCompile Include="Stage1ServerWindow.cpp"/>
+    <ClCompile Include="Stage1DatasetManager.cpp"/>
+    <ClCompile Include="Stage1MetadataReader.cpp"/>
+    <ClCompile Include="Stage1RestClient.cpp"/>
+    <ClCompile Include="modern_indicators\src\IndicatorConfig.cpp"/>
+    <ClCompile Include="modern_indicators\src\IndicatorEngine.cpp"/>
+    <ClCompile Include="modern_indicators\src\IndicatorId.cpp"/>
+    <ClCompile Include="modern_indicators\src\MathUtils.cpp"/>
+    <ClCompile Include="modern_indicators\src\MultiIndicatorLibrary.cpp"/>
+    <ClCompile Include="modern_indicators\src\SingleIndicatorLibrary.cpp"/>
+    <ClCompile Include="modern_indicators\src\TaskExecutor.cpp"/>
+    <ClCompile Include="modern_indicators\src\validation\DataParsers.cpp"/>
+    <ClCompile Include="modern_indicators\src\helpers\Fti.cpp"/>
+    <ClCompile Include="modern_indicators\src\helpers\InformationTheory.cpp"/>
+    <ClCompile Include="modern_indicators\src\helpers\Janus.cpp"/>
+    <ClCompile Include="modern_indicators\src\helpers\WaveletHelpers.cpp"/>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\imconfig.h"/>
+    <ClInclude Include="..\..\imgui.h"/>
+    <ClInclude Include="..\..\imgui_internal.h"/>
+    <ClInclude Include="..\..\backends\imgui_impl_glfw.h"/>
+    <ClInclude Include="..\..\backends\imgui_impl_opengl3.h"/>
+    <ClInclude Include="..\..\backends\imgui_impl_opengl3_loader.h"/>
+    <ClInclude Include="implot.h"/>
+    <ClInclude Include="implot_internal.h"/>
+    <ClInclude Include="ohlcv_data.h"/>
+    <ClInclude Include="utils.h"/>
+    <ClInclude Include="implot_custom_plotters.h"/>
+    <ClInclude Include="candlestick_chart.h"/>
+    <ClInclude Include="TickerSelector.h"/>
+    <ClInclude Include="NewsWindow.h"/>
+    <ClInclude Include="TimeSeriesWindow.h"/>
+    <ClInclude Include="IndicatorBuilderWindow.h"/>
+    <ClInclude Include="HistogramWindow.h"/>
+    <ClInclude Include="TradeSimulator.h"/>
+    <ClInclude Include="TradeSimulationWindow.h"/>
+    <ClInclude Include="TimeSeries.h"/>
+    <ClInclude Include="Stage1ServerWindow.h"/>
+    <ClInclude Include="Stage1DatasetManager.h"/>
+    <ClInclude Include="QuestDbImports.h"/>
+    <ClInclude Include="Stage1MetadataReader.h"/>
+    <ClInclude Include="Stage1RestClient.h"/>
+    <ClInclude Include="BivarAnalysisWidget.h"/>
+    <ClInclude Include="ESSWindow.h"/>
+    <ClInclude Include="LFSWindow.h"/>
+    <ClInclude Include="lfs\const.h"/>
+    <ClInclude Include="lfs\classes.h"/>
+    <ClInclude Include="lfs\funcdefs.h"/>
+    <ClInclude Include="lfs\data_matrix.h"/>
+    <ClInclude Include="lfs\lfs.h"/>
+    <ClInclude Include="lfs\lfs_data_reader.h"/>
+    <ClInclude Include="lfs\lfs_cuda.h"/>
+    <ClInclude Include="FeatureSelectorWidget.h"/>
+    <ClInclude Include="bivariate_analysis_exact.h"/>
+    <ClInclude Include="modern_algorithms.h"/>
+    <ClInclude Include="modern_discretizer.h"/>
+    <ClInclude Include="aligned_allocator.h"/>
+    <ClInclude Include="simple_logger.h"/>
+    <ClInclude Include="stepwise\enhanced_stepwise.h"/>
+    <ClInclude Include="stepwise\enhanced_stepwise_selector.h"/>
+    <ClInclude Include="stepwise\data_matrix.h"/>
+    <ClInclude Include="stepwise\cross_validator.h"/>
+    <ClInclude Include="stepwise\linear_quadratic_model.h"/>
+    <ClInclude Include="stepwise\monte_carlo_permutation_test.h"/>
+    <ClInclude Include="stepwise\modern_svd.h"/>
+    <ClInclude Include="stepwise\memory_pool.h"/>
+    <ClInclude Include="stepwise\stepwise_data_reader.h"/>
+    <ClInclude Include="stepwise\model_interface.h"/>
+    <ClInclude Include="stepwise\xgboost_config_widget.h"/>
+    <ClInclude Include="stepwise\xgboost_model.h"/>
+    <ClInclude Include="stepwise\linear_quadratic_model_wrapper.h"/>
+    <ClInclude Include="stepwise\enhanced_stepwise_v2.h"/>
+    <ClInclude Include="stepwise\enhanced_stepwise_selector_v2.h"/>
+    <ClInclude Include="SimulationWindowAdapter.h"/>
+    <ClInclude Include="simulation\SimulationWindowNew.h"/>
+    <ClInclude Include="simulation\SimulationTypes.h"/>
+    <ClInclude Include="simulation\ISimulationModel_v2.h"/>
+    <ClInclude Include="simulation\XGBoostConfig.h"/>
+    <ClInclude Include="simulation\SimulationUtils.h"/>
+    <ClInclude Include="simulation\PerformanceMetrics.h"/>
+    <ClInclude Include="simulation\SimulationEngine.h"/>
+    <ClInclude Include="simulation\models\XGBoostModel.h"/>
+    <ClInclude Include="simulation\models\XGBoostWidget.h"/>
+    <ClInclude Include="simulation\ui\UniversalConfigWidget.h"/>
+    <ClInclude Include="simulation\ui\SimulationResultsWidget.h"/>
+    <ClInclude Include="simulation\ui\SimulationResultsWidget_v2.h"/>
+    <ClInclude Include="simulation\ui\SimulationControlsWidget.h"/>
+    <ClInclude Include="simulation\TestModelWindow.h"/>
+    <ClInclude Include="simulation\ThresholdCalculator.h"/>
+    <ClInclude Include="RunConfigSerializer.h"/>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\misc\debuggers\imgui.natstepfilter"/>
+    <None Include="..\..\misc\debuggers\imgui.natvis"/>
+    <None Include="..\README.txt"/>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets"/>
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.0.targets"/>
+  </ImportGroup>
+</Project>

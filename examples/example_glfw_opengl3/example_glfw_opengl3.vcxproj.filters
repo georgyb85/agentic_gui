@@ -1,0 +1,410 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="imgui">
+      <UniqueIdentifier>{20b90ce4-7fcb-4731-b9a0-075f875de82d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="sources">
+      <UniqueIdentifier>{f18ab499-84e1-499f-8eff-9754361e0e52}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\imgui.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\imgui_demo.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\imgui_draw.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\imgui_tables.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\imgui_widgets.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\misc\cpp\imgui_stdlib.cpp">
+      <Filter>imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\backends\imgui_impl_glfw.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\backends\imgui_impl_opengl3.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="utils.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="implot.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="implot_demo.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="implot_items.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="implot_custom_plotters.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="candlestick_chart.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="TickerSelector.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="NewsWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="TimeSeriesWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="HistogramWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="TradeSimulator.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="TradeSimulationWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="Stage1RestClient.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stage1_metadata_writer.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="BivarAnalysisWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="bivariate_analysis_exact.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_algorithms.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_discretizer.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="analytics_dataframe.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="dataframe_io.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="tssb_timestamp.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="feature_utils.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="hmm\HmmModel.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="hmm\HmmTargetCorrelation.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="hmm\HmmMemoryTest.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stationarity\MeanBreakTest.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="fsca\FscaAnalyzer.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\PerformanceStressTests.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="ESSWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="FSCAWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="HMMMemoryWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="HMMTargetWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="LFSWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="StationarityWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs_data_reader.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs_do_case.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs_beta.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs_weights.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\simplex.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\simplex_legacy.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\qsortd.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\rand32.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\part.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="lfs\lfs_globals.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="FeatureSelectorWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <CudaCompile Include="lfs\lfs_cuda.cu">
+      <Filter>sources</Filter>
+    </CudaCompile>
+    <ClCompile Include="stepwise\enhanced_stepwise.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\enhanced_stepwise_selector.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\data_matrix.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\cross_validator.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\linear_quadratic_model.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\monte_carlo_permutation_test.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\modern_svd.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\memory_pool.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\legacy_bridge.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\stepwise_data_reader.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\xgboost_config_widget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\xgboost_model.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\linear_quadratic_model_wrapper.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\enhanced_stepwise_v2.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="stepwise\enhanced_stepwise_selector_v2.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\SimulationWindowNew.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\SimulationTypes.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ModelFactory.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\PerformanceMetrics.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\SimulationEngine.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\models\XGBoostModel.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\models\XGBoostWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ui\UniversalConfigWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ui\SimulationResultsWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ui\SimulationResultsWidget_v2.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ui\SimulationControlsWidget.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\TestModelWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="simulation\ThresholdCalculator.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\IndicatorConfig.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\IndicatorEngine.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\IndicatorId.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\MathUtils.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\MultiIndicatorLibrary.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\SingleIndicatorLibrary.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\TaskExecutor.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\validation\DataParsers.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\helpers\Fti.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\helpers\InformationTheory.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\helpers\Janus.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="modern_indicators\src\helpers\WaveletHelpers.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+    <ClCompile Include="IndicatorBuilderWindow.cpp">
+      <Filter>sources</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\imconfig.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\imgui.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\imgui_internal.h">
+      <Filter>imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\backends\imgui_impl_glfw.h">
+      <Filter>sources</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\backends\imgui_impl_opengl3.h">
+      <Filter>sources</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\backends\imgui_impl_opengl3_loader.h">
+      <Filter>sources</Filter>
+    </ClInclude>
+    <ClInclude Include="utils.h" />
+    <ClInclude Include="implot.h" />
+    <ClInclude Include="implot_internal.h" />
+    <ClInclude Include="implot_custom_plotters.h" />
+    <ClInclude Include="candlestick_chart.h" />
+    <ClInclude Include="TickerSelector.h" />
+    <ClInclude Include="ohlcv_data.h" />
+    <ClInclude Include="NewsWindow.h" />
+    <ClInclude Include="TimeSeriesWindow.h" />
+    <ClInclude Include="IndicatorBuilderWindow.h" />
+    <ClInclude Include="HistogramWindow.h" />
+    <ClInclude Include="TradeSimulator.h" />
+    <ClInclude Include="TradeSimulationWindow.h" />
+    <ClInclude Include="stage1_metadata_writer.h" />
+    <ClInclude Include="TimeSeries.h" />
+    <ClInclude Include="BivarAnalysisWidget.h" />
+    <ClInclude Include="bivariate_analysis_exact.h" />
+    <ClInclude Include="modern_algorithms.h" />
+    <ClInclude Include="modern_discretizer.h" />
+    <ClInclude Include="aligned_allocator.h" />
+    <ClInclude Include="simple_logger.h" />
+    <ClInclude Include="ESSWindow.h" />
+    <ClInclude Include="LFSWindow.h" />
+    <ClInclude Include="lfs\const.h" />
+    <ClInclude Include="lfs\classes.h" />
+    <ClInclude Include="lfs\funcdefs.h" />
+    <ClInclude Include="lfs\data_matrix.h" />
+    <ClInclude Include="lfs\lfs.h" />
+    <ClInclude Include="lfs\lfs_data_reader.h" />
+    <ClInclude Include="lfs\lfs_cuda.h" />
+    <ClInclude Include="FeatureSelectorWidget.h" />
+    <ClInclude Include="stepwise\enhanced_stepwise.h" />
+    <ClInclude Include="stepwise\enhanced_stepwise_selector.h" />
+    <ClInclude Include="stepwise\data_matrix.h" />
+    <ClInclude Include="stepwise\cross_validator.h" />
+    <ClInclude Include="stepwise\linear_quadratic_model.h" />
+    <ClInclude Include="stepwise\monte_carlo_permutation_test.h" />
+    <ClInclude Include="stepwise\modern_svd.h" />
+    <ClInclude Include="stepwise\memory_pool.h" />
+    <ClInclude Include="stepwise\stepwise_data_reader.h" />
+    <ClInclude Include="stepwise\model_interface.h" />
+    <ClInclude Include="stepwise\xgboost_config_widget.h" />
+    <ClInclude Include="stepwise\xgboost_model.h" />
+    <ClInclude Include="stepwise\linear_quadratic_model_wrapper.h" />
+    <ClInclude Include="stepwise\enhanced_stepwise_v2.h" />
+    <ClInclude Include="stepwise\enhanced_stepwise_selector_v2.h" />
+    <ClInclude Include="stepwise\bivar\aligned_allocator.h" />
+    <ClInclude Include="stepwise\bivar\simple_logger.h" />
+    <ClInclude Include="SimulationWindowAdapter.h" />
+    <ClInclude Include="simulation\SimulationWindowNew.h" />
+    <ClInclude Include="simulation\SimulationTypes.h" />
+    <ClInclude Include="simulation\ISimulationModel_v2.h" />
+    <ClInclude Include="simulation\XGBoostConfig.h" />
+    <ClInclude Include="simulation\SimulationUtils.h" />
+    <ClInclude Include="simulation\PerformanceMetrics.h" />
+    <ClInclude Include="simulation\SimulationEngine.h" />
+    <ClInclude Include="simulation\models\XGBoostModel.h" />
+    <ClInclude Include="simulation\models\XGBoostWidget.h" />
+    <ClInclude Include="simulation\ui\UniversalConfigWidget.h" />
+    <ClInclude Include="simulation\ui\SimulationResultsWidget.h" />
+    <ClInclude Include="simulation\ui\SimulationResultsWidget_v2.h" />
+    <ClInclude Include="simulation\ui\SimulationControlsWidget.h" />
+    <ClInclude Include="simulation\TestModelWindow.h" />
+    <ClInclude Include="simulation\ThresholdCalculator.h" />
+    <ClInclude Include="FSCAWindow.h" />
+    <ClInclude Include="HMMMemoryWindow.h" />
+    <ClInclude Include="HMMTargetWindow.h" />
+    <ClInclude Include="StationarityWindow.h" />
+    <ClInclude Include="Stage1RestClient.h" />
+    <ClInclude Include="hmm\HmmModel.h" />
+    <ClInclude Include="hmm\HmmTargetCorrelation.h" />
+    <ClInclude Include="hmm\HmmMemoryTest.h" />
+    <ClInclude Include="hmm\HmmGpu.h" />
+    <ClInclude Include="stationarity\MeanBreakTest.h" />
+    <ClInclude Include="fsca\FscaAnalyzer.h" />
+    <ClInclude Include="simulation\PerformanceStressTests.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\README.txt" />
+    <None Include="..\..\misc\debuggers\imgui.natvis">
+      <Filter>imgui</Filter>
+    </None>
+    <None Include="..\..\misc\debuggers\imgui.natstepfilter">
+      <Filter>imgui</Filter>
+    </None>
+  </ItemGroup>
+</Project>

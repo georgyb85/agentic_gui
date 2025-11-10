@@ -1,0 +1,621 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <numeric>
+#include <cmath>
+#include <iomanip>
+#include <map>
+#include <xgboost/c_api.h>
+
+struct DataPoint {
+    std::vector<float> features;
+    float target;
+};
+
+struct ScaleParams {
+    float mean;
+    float std_dev;
+};
+
+struct FoldResult {
+    int train_start, train_end;
+    int test_start, test_end;
+    int n_train_samples;
+    int n_val_samples;
+    int n_test_samples;
+    int best_iteration;
+    float best_score;
+    float prediction_threshold_scaled;
+    float prediction_threshold_original;
+    float dynamic_positive_threshold;
+    ScaleParams scale_params;
+    int n_signals;
+    float signal_sum;
+    float signal_rate;
+    float avg_return_on_signals;
+    float median_return_on_signals;
+    float std_return_on_signals;
+    float hit_rate;
+    float avg_predicted_return_on_signals;
+};
+
+class BTCPredictor {
+private:
+    std::vector<DataPoint> data;
+    std::vector<std::string> feature_columns;
+    std::string target_column;
+    float running_sum;
+    std::vector<float> trades;
+
+    void checkXGBoostError(int status, const std::string& context) {
+        if (status != 0) {
+            const char* error = XGBGetLastError();
+            std::cerr << "XGBoost error in " << context << ": " << error << std::endl;
+            throw std::runtime_error("XGBoost error");
+        }
+    }
+
+    std::vector<std::string> split(const std::string& s, char delimiter) {
+        std::vector<std::string> tokens;
+        std::stringstream ss(s);
+        std::string token;
+        while (std::getline(ss, token, delimiter)) {
+            if (!token.empty()) {
+                tokens.push_back(token);
+            }
+        }
+        return tokens;
+    }
+
+    float calculateMedian(std::vector<float>& values) {
+        if (values.empty()) return 0.0f;
+        
+        std::sort(values.begin(), values.end());
+        size_t n = values.size();
+        
+        if (n % 2 == 0) {
+            return (values[n / 2 - 1] + values[n / 2]) / 2.0f;
+        } else {
+            return values[n / 2];
+        }
+    }
+
+    float calculateStdDev(const std::vector<float>& values, float mean) {
+        if (values.size() <= 1) return 0.0f;
+        
+        float sum_sq_diff = 0.0f;
+        for (float val : values) {
+            float diff = val - mean;
+            sum_sq_diff += diff * diff;
+        }
+        return std::sqrt(sum_sq_diff / (values.size() - 1));
+    }
+
+    float calculateQuantile(std::vector<float> values, float quantile) {
+        if (values.empty()) return 0.0f;
+        
+        std::sort(values.begin(), values.end());
+        int index = static_cast<int>(quantile * (values.size() - 1));
+        return values[index];
+    }
+
+public:
+    BTCPredictor() : running_sum(0.0f) {
+        initializeFeatureColumns();
+    }
+
+    void initializeFeatureColumns() {
+        feature_columns = {
+"BOL_WIDTH_M",  "CMMA_S", "DTR_RSI_M", "PV_FIT_M", "AROON_DIFF_S", "PCO_10_20", "ADX_L", 
+        };
+        target_column = "TGT_555";
+    }
+
+    bool loadAndPreprocessData(const std::string& file_path) {
+        std::ifstream file(file_path);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open file " << file_path << std::endl;
+            return false;
+        }
+
+        std::string line;
+        std::getline(file, line);
+        
+        std::map<std::string, int> header_indices;
+        auto headers = split(line, ' ');
+        for (size_t i = 0; i < headers.size(); ++i) {
+            header_indices[headers[i]] = i;
+        }
+
+        std::vector<int> feature_indices;
+        for (const auto& feature : feature_columns) {
+            if (header_indices.find(feature) != header_indices.end()) {
+                feature_indices.push_back(header_indices[feature]);
+            }
+        }
+
+        int target_index = header_indices[target_column];
+
+        while (std::getline(file, line)) {
+            auto values = split(line, ' ');
+            
+            DataPoint dp;
+            bool has_na = false;
+            
+            for (int idx : feature_indices) {
+                if (idx < values.size()) {
+                    try {
+                        float val = std::stof(values[idx]);
+                        dp.features.push_back(val);
+                    } catch (...) {
+                        has_na = true;
+                        break;
+                    }
+                } else {
+                    has_na = true;
+                    break;
+                }
+            }
+
+            if (!has_na && target_index < values.size()) {
+                try {
+                    dp.target = std::stof(values[target_index]);
+                    data.push_back(dp);
+                } catch (...) {
+                }
+            }
+        }
+
+        file.close();
+        std::cout << "Loaded " << data.size() << " data points with " 
+                  << feature_columns.size() << " features each" << std::endl;
+        return true;
+    }
+
+    ScaleParams standardizeTarget(const std::vector<float>& y_train,
+                                 std::vector<float>& y_train_scaled,
+                                 std::vector<float>& y_val_scaled,
+                                 std::vector<float>& y_test_scaled,
+                                 const std::vector<float>& y_val,
+                                 const std::vector<float>& y_test) {
+        
+        float mean = std::accumulate(y_train.begin(), y_train.end(), 0.0f) / y_train.size();
+        float std_dev = calculateStdDev(y_train, mean);
+        
+        if (std_dev == 0.0f) std_dev = 1.0f;
+        
+        ScaleParams params = {mean, std_dev};
+        
+        y_train_scaled.clear();
+        for (float val : y_train) {
+            y_train_scaled.push_back((val - mean) / std_dev);
+        }
+        
+        y_val_scaled.clear();
+        for (float val : y_val) {
+            y_val_scaled.push_back((val - mean) / std_dev);
+        }
+        
+        y_test_scaled.clear();
+        for (float val : y_test) {
+            y_test_scaled.push_back((val - mean) / std_dev);
+        }
+        
+        return params;
+    }
+
+    std::vector<float> reverseTransformTarget(const std::vector<float>& y_scaled,
+                                             const ScaleParams& params) {
+        std::vector<float> y_original;
+        for (float val : y_scaled) {
+            y_original.push_back((val * params.std_dev) + params.mean);
+        }
+        return y_original;
+    }
+
+    static int asymmetricLongOnlyObjective(const float* preds, DMatrixHandle dtrain,
+                                          bst_ulong len, float* grad, float* hess) {
+        bst_ulong nrows;
+        XGDMatrixNumRow(dtrain, &nrows);
+        
+        const float* labels;
+        XGDMatrixGetFloatInfo(dtrain, "label", &nrows, &labels);
+        
+        const float UNDERPREDICTION_SCALE_FACTOR = 10.0f;
+        const float positive_threshold = 0.1f;
+        
+        for (bst_ulong i = 0; i < len; ++i) {
+            float residual = preds[i] - labels[i];
+            float weight = 1.0f;
+            
+            if (labels[i] > positive_threshold && residual < 0) {
+                weight = UNDERPREDICTION_SCALE_FACTOR;
+            }
+            
+            grad[i] = 2.0f * weight * residual;
+            hess[i] = 2.0f * weight;
+        }
+        
+        return 0;
+    }
+
+    FoldResult testSingleFold(int train_start, int train_end,
+                             int test_start, int test_end,
+                             float val_split_ratio = 0.8f,
+                             int num_boost_round = 2000,
+                             int early_stopping_rounds = 50,
+                             bool verbose = true) {
+        
+        FoldResult result;
+        result.train_start = train_start;
+        result.train_end = train_end;
+        result.test_start = test_start;
+        result.test_end = test_end;
+
+        int split_point = train_start + static_cast<int>((train_end - train_start) * val_split_ratio);
+        
+        std::vector<float> X_train_flat, y_train;
+        for (int i = train_start; i < split_point && i < data.size(); ++i) {
+            for (float f : data[i].features) {
+                X_train_flat.push_back(f);
+            }
+            y_train.push_back(data[i].target);
+        }
+        
+        std::vector<float> X_val_flat, y_val;
+        for (int i = split_point; i < train_end && i < data.size(); ++i) {
+            for (float f : data[i].features) {
+                X_val_flat.push_back(f);
+            }
+            y_val.push_back(data[i].target);
+        }
+        
+        std::vector<float> X_test_flat, y_test;
+        for (int i = test_start; i < test_end && i < data.size(); ++i) {
+            for (float f : data[i].features) {
+                X_test_flat.push_back(f);
+            }
+            y_test.push_back(data[i].target);
+        }
+        
+        result.n_train_samples = y_train.size();
+        result.n_val_samples = y_val.size();
+        result.n_test_samples = y_test.size();
+        
+        if (verbose) {
+            std::cout << "Training set shape: " << result.n_train_samples 
+                     << " x " << feature_columns.size() << std::endl;
+            std::cout << "Validation set shape: " << result.n_val_samples 
+                     << " x " << feature_columns.size() << std::endl;
+            std::cout << "Test set shape: " << result.n_test_samples 
+                     << " x " << feature_columns.size() << std::endl;
+        }
+        
+        std::vector<float> y_train_scaled, y_val_scaled, y_test_scaled;
+        result.scale_params = standardizeTarget(y_train, y_train_scaled, 
+                                               y_val_scaled, y_test_scaled,
+                                               y_val, y_test);
+        
+        std::vector<float> y_train_positive;
+        for (float val : y_train_scaled) {
+            if (val > 0) y_train_positive.push_back(val);
+        }
+        result.dynamic_positive_threshold = y_train_positive.empty() ? 
+            0.1f : calculateQuantile(y_train_positive, 0.5f);
+        
+        if (verbose) {
+            std::cout << "Dynamic positive threshold (scaled): " 
+                     << result.dynamic_positive_threshold << std::endl;
+        }
+        
+        DMatrixHandle dtrain, dval, dtest;
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_train_flat.data(), result.n_train_samples, 
+                                 feature_columns.size(), -1, &dtrain),
+            "Creating training matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dtrain, "label", y_train_scaled.data(), result.n_train_samples),
+            "Setting training labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_val_flat.data(), result.n_val_samples, 
+                                 feature_columns.size(), -1, &dval),
+            "Creating validation matrix"
+        );
+        checkXGBoostError(
+            XGDMatrixSetFloatInfo(dval, "label", y_val_scaled.data(), result.n_val_samples),
+            "Setting validation labels"
+        );
+        
+        checkXGBoostError(
+            XGDMatrixCreateFromMat(X_test_flat.data(), result.n_test_samples, 
+                                 feature_columns.size(), -1, &dtest),
+            "Creating test matrix"
+        );
+        
+        BoosterHandle booster;
+        DMatrixHandle eval_dmats[2] = {dtrain, dval};
+        const char* eval_names[2] = {"train", "val"};
+        
+        checkXGBoostError(
+            XGBoosterCreate(eval_dmats, 2, &booster),
+            "Creating booster"
+        );
+        
+        // Core parameters
+        checkXGBoostError(XGBoosterSetParam(booster, "learning_rate", "0.01"), "Setting learning_rate");
+        checkXGBoostError(XGBoosterSetParam(booster, "min_child_weight", "10"), "Setting min_child_weight");
+        checkXGBoostError(XGBoosterSetParam(booster, "max_depth", "4"), "Setting max_depth");
+        checkXGBoostError(XGBoosterSetParam(booster, "subsample", "0.8"), "Setting subsample");
+        checkXGBoostError(XGBoosterSetParam(booster, "colsample_bytree", "0.7"), "Setting colsample_bytree");
+        checkXGBoostError(XGBoosterSetParam(booster, "lambda", "2"), "Setting lambda");
+        checkXGBoostError(XGBoosterSetParam(booster, "seed", "43"), "Setting seed");
+        checkXGBoostError(XGBoosterSetParam(booster, "objective", "reg:squarederror"), "Setting objective");
+        
+        // Try different GPU configurations
+        // First try to explicitly set device to gpu
+        int gpu_result = XGBoosterSetParam(booster, "device", "gpu");
+        if (gpu_result != 0) {
+            // If that fails, try cuda:0
+            gpu_result = XGBoosterSetParam(booster, "device", "cuda:0");
+            if (gpu_result != 0) {
+                // If that also fails, try cuda
+                gpu_result = XGBoosterSetParam(booster, "device", "cuda");
+                if (gpu_result != 0) {
+                    std::cout << "WARNING: Cannot set GPU device, using CPU" << std::endl;
+                    checkXGBoostError(XGBoosterSetParam(booster, "device", "cpu"), "Setting device to CPU");
+                }
+            }
+        }
+        
+        // Set tree method - hist works on both CPU and GPU
+        checkXGBoostError(XGBoosterSetParam(booster, "tree_method", "hist"), "Setting tree_method");
+        
+        float best_score = std::numeric_limits<float>::max();
+        int best_iteration = 0;
+        int rounds_without_improvement = 0;
+        
+        for (int iter = 0; iter < num_boost_round; ++iter) {
+            checkXGBoostError(
+                XGBoosterUpdateOneIter(booster, iter, dtrain),
+                "Training iteration " + std::to_string(iter)
+            );
+            
+            const char* eval_result;
+            checkXGBoostError(
+                XGBoosterEvalOneIter(booster, iter, eval_dmats, eval_names, 2, &eval_result),
+                "Evaluation iteration " + std::to_string(iter)
+            );
+            
+            std::string eval_str(eval_result);
+            size_t val_pos = eval_str.find("val-rmse:");
+            if (val_pos != std::string::npos) {
+                float val_score = std::stof(eval_str.substr(val_pos + 9));
+                
+                if (val_score < best_score) {
+                    best_score = val_score;
+                    best_iteration = iter;
+                    rounds_without_improvement = 0;
+                } else {
+                    rounds_without_improvement++;
+                }
+                
+                if (verbose && iter % 100 == 0) {
+                    std::cout << "[" << iter << "] " << eval_str << std::endl;
+                }
+                
+                if (rounds_without_improvement >= early_stopping_rounds) {
+                    if (verbose) {
+                        std::cout << "Early stopping at iteration " << iter << std::endl;
+                    }
+                    break;
+                }
+            }
+        }
+        
+        result.best_iteration = best_iteration;
+        result.best_score = best_score;
+        
+        bst_ulong val_len, test_len;
+        const float* y_pred_val_scaled_ptr;
+        const float* y_pred_test_scaled_ptr;
+        
+        checkXGBoostError(
+            XGBoosterPredict(booster, dval, 0, 0, 0, &val_len, &y_pred_val_scaled_ptr),
+            "Predicting validation set"
+        );
+        
+        checkXGBoostError(
+            XGBoosterPredict(booster, dtest, 0, 0, 0, &test_len, &y_pred_test_scaled_ptr),
+            "Predicting test set"
+        );
+        
+        std::vector<float> y_pred_val_scaled(y_pred_val_scaled_ptr, y_pred_val_scaled_ptr + val_len);
+        std::vector<float> y_pred_test_scaled(y_pred_test_scaled_ptr, y_pred_test_scaled_ptr + test_len);
+        
+        result.prediction_threshold_scaled = calculateQuantile(y_pred_val_scaled, 0.95f);
+        
+        std::vector<float> threshold_vec = {result.prediction_threshold_scaled};
+        auto threshold_original = reverseTransformTarget(threshold_vec, result.scale_params);
+        result.prediction_threshold_original = threshold_original[0];
+        
+        auto y_pred_test_original = reverseTransformTarget(y_pred_test_scaled, result.scale_params);
+        
+        std::vector<float> actual_returns_on_signals;
+        std::vector<float> predicted_returns_on_signals;
+        
+        for (size_t i = 0; i < y_pred_test_scaled.size(); ++i) {
+            if (y_pred_test_scaled[i] > result.prediction_threshold_scaled) {
+                actual_returns_on_signals.push_back(y_test[i]);
+                predicted_returns_on_signals.push_back(y_pred_test_original[i]);
+            }
+        }
+        
+        result.n_signals = actual_returns_on_signals.size();
+        result.signal_sum = std::accumulate(actual_returns_on_signals.begin(), 
+                                          actual_returns_on_signals.end(), 0.0f);
+        result.signal_rate = result.n_test_samples > 0 ? 
+            static_cast<float>(result.n_signals) / result.n_test_samples : 0.0f;
+        
+        if (result.n_signals > 0) {
+            result.avg_return_on_signals = result.signal_sum / result.n_signals;
+            result.median_return_on_signals = calculateMedian(actual_returns_on_signals);
+            result.std_return_on_signals = calculateStdDev(actual_returns_on_signals, 
+                                                          result.avg_return_on_signals);
+            
+            int positive_returns = 0;
+            for (float ret : actual_returns_on_signals) {
+                if (ret > 0) positive_returns++;
+            }
+            result.hit_rate = static_cast<float>(positive_returns) / result.n_signals;
+            
+            result.avg_predicted_return_on_signals = 
+                std::accumulate(predicted_returns_on_signals.begin(), 
+                              predicted_returns_on_signals.end(), 0.0f) / result.n_signals;
+        } else {
+            result.avg_return_on_signals = 0.0f;
+            result.median_return_on_signals = 0.0f;
+            result.std_return_on_signals = 0.0f;
+            result.hit_rate = 0.0f;
+            result.avg_predicted_return_on_signals = 0.0f;
+        }
+        
+        if (result.n_signals > 0) {
+            running_sum += result.signal_sum;
+            trades.push_back(running_sum);
+            std::cout << "===> Running sum: " << std::fixed << std::setprecision(6) 
+                     << running_sum << " <====" << std::endl;
+            std::cout << "Sum of signals: " << result.signal_sum << std::endl;
+            std::cout << "Hit rate: " << std::fixed << std::setprecision(2) 
+                     << (result.hit_rate * 100) << "%" << std::endl;
+        } else {
+            std::cout << "No signals generated." << std::endl;
+        }
+        
+        std::cout << std::string(50, '-') << std::endl;
+        
+        XGDMatrixFree(dtrain);
+        XGDMatrixFree(dval);
+        XGDMatrixFree(dtest);
+        XGBoosterFree(booster);
+        
+        return result;
+    }
+    
+    void runWalkForwardValidation() {
+        std::cout << "\n=== Testing Single Fold ===" << std::endl;
+        testSingleFold(93000, 96601, 96605, 97905, 0.8f, 2000, 50, true);
+        
+        std::cout << "\n=== Example Walk-Forward Test (3 folds) ===" << std::endl;
+        std::vector<FoldResult> fold_results;
+        
+        std::vector<std::tuple<int, int, int, int>> test_configs = {
+            {90000, 93000, 93000, 94000},
+            {91000, 94000, 94000, 95000},
+            {92000, 95000, 95000, 96000}
+        };
+        
+        for (size_t i = 0; i < test_configs.size(); ++i) {
+            int tr_start = std::get<0>(test_configs[i]);
+            int tr_end = std::get<1>(test_configs[i]);
+            int te_start = std::get<2>(test_configs[i]);
+            int te_end = std::get<3>(test_configs[i]);
+            std::cout << "\n--- Fold " << (i + 1) << " ---" << std::endl;
+            
+            FoldResult fold_result = testSingleFold(tr_start, tr_end, te_start, te_end,
+                                                   0.8f, 2000, 50, false);
+            fold_results.push_back(fold_result);
+            
+            std::cout << "Fold " << (i + 1) << ": " << fold_result.n_signals 
+                     << " signals (" << std::fixed << std::setprecision(2) 
+                     << (fold_result.signal_rate * 100) << "%), "
+                     << "Avg return: " << std::fixed << std::setprecision(6)
+                     << fold_result.avg_return_on_signals << ", "
+                     << "Hit rate: " << std::fixed << std::setprecision(2)
+                     << (fold_result.hit_rate * 100) << "%" << std::endl;
+        }
+        
+        if (!fold_results.empty()) {
+            float sum_signal_rate = 0.0f;
+            float sum_return = 0.0f;
+            float sum_hit_rate = 0.0f;
+            int valid_folds = 0;
+            
+            for (const auto& r : fold_results) {
+                sum_signal_rate += r.signal_rate;
+                if (r.n_signals > 0) {
+                    sum_return += r.avg_return_on_signals;
+                    sum_hit_rate += r.hit_rate;
+                    valid_folds++;
+                }
+            }
+            
+            std::cout << "\n=== Walk-Forward Summary ===" << std::endl;
+            std::cout << "Average signal rate: " << std::fixed << std::setprecision(2)
+                     << (sum_signal_rate / fold_results.size() * 100) << "%" << std::endl;
+            if (valid_folds > 0) {
+                std::cout << "Average return on signals: " << std::fixed << std::setprecision(6)
+                         << (sum_return / valid_folds) << std::endl;
+                std::cout << "Average hit rate: " << std::fixed << std::setprecision(2)
+                         << (sum_hit_rate / valid_folds * 100) << "%" << std::endl;
+            }
+        }
+        
+        running_sum = 0.0f;
+        std::cout << "\n=== Extended Walk-Forward Validation ===" << std::endl;
+        for (int i = 50; i < 750; ++i) {
+            int train_start = 6000 + i * 200;
+            int train_end = 16000 + i * 200;
+            int test_start = 16009 + i * 200;
+            int test_end = 16209 + i * 200;
+            
+            // Check if we have enough data
+            if (test_end > data.size()) {
+                std::cout << "Stopping at fold " << i << " - insufficient data (need " 
+                         << test_end << " rows, have " << data.size() << ")" << std::endl;
+                break;
+            }
+            
+            std::cout << "\n=== Testing Single Fold " << i << " ===" << std::endl;
+            testSingleFold(train_start, train_end, test_start, test_end,
+                          0.8f, 2000, 50, false);
+        }
+    }
+};
+
+int main() {
+    int major, minor, patch;
+    XGBoostVersion(&major, &minor, &patch);
+    
+    std::cout << "Successfully linked XGBoost!" << std::endl;
+    std::cout << "XGBoost Version: " << major << "." << minor << "." << patch << std::endl;
+    
+    // Try to force XGBoost to initialize CUDA context
+    std::cout << "Initializing XGBoost with GPU support..." << std::endl;
+    
+    // For XGBoost 3.x, the global config format is different
+    const char* config = "{\"verbosity\": 1}";  // This will show more debug info
+    int result = XGBSetGlobalConfig(config);
+    if (result != 0) {
+        std::cout << "Note: Could not set global config: " << XGBGetLastError() << std::endl;
+    }
+    
+    BTCPredictor predictor;
+    
+    const std::string file_path = "c:/src/BTC15_WITH_HMM (3).dat";
+    
+    std::cout << "Loading and preprocessing data..." << std::endl;
+    if (!predictor.loadAndPreprocessData(file_path)) {
+        std::cerr << "Failed to load data!" << std::endl;
+        return 1;
+    }
+    
+    predictor.runWalkForwardValidation();
+    
+    return 0;
+}

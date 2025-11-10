@@ -1,0 +1,222 @@
+Walkforward Testing
+Walkforward testing is straightforward, intuitive, and widely used. The
+principle is that we train the model on a relatively long block of data that ends a
+considerable time in the past. We test the trained model on a relatively short
+section of data that immediately follows the training block. Then we shift the
+training and testing blocks forward in time by an amount equal to the length of
+the test block and repeat the prior steps. Walkforward testing ends when we
+reach the end of the dataset. We compute the net performance figure by pooling
+all of the test block trades. Here is a simple example of walkforward testing:
+1) Train the model using data from 1990 through 2007. Test the model on 2008
+data.
+2) Train the model using data from 1991 through 2008. Test the model on 2009
+data.
+3) Train the model using data from 1992 through 2009. Test the model on 2010
+data.
+Pool all trades from the tests of 2008, 2009, and 2010. These trades are used to
+compute an unbiased estimate of the performance of the model.
+The primary advantage of walkforward testing is that it mimics real life. Most
+developers of automated trading systems periodically retrain or otherwise
+refine their model. Thus, the results of a walkforward test simulate the results
+that would have been obtained if the system had been actually traded. This is a
+compelling argument in favor of this testing methodology.
+Another advantage of walkforward testing is that it correctly reflects the
+response of the model to nonstationarity in the market. All markets evolve and
+change their behavior over time, sometimes rotating through a number of
+different regimes. Loosely speaking, this change in market dynamics, and hence
+in relationships between indicator and target variables, is called
+nonstationarity. The best predictive models have a significant degree of
+robustness against such changes, and walkforward testing allows us to judge the
+robustness of a model.
+TSSB’s ability to use a variety of testing block lengths makes it easy to evaluate
+the robustness of a model against nonstationarity. Suppose a model achieves
+excellent walkforward results when the test block is very short. In other words,
+the model is never asked to make predictions for data that is far past the date on
+which its training block ended. Now suppose the walkforward performance
+deteriorates if the test block is made longer. This indicates that the market is
+rapidly changing in ways that the model is not capable of handling. Such a
+model is risky and will require frequent retraining if it is to keep abreast of
+current market conditions. On the other hand, if walkforward performance holds
+up well as the length of the test block is increased, the model is robust against
+nonstationarity. This is a valuable attribute of a predictive model. Look at
+Figure 1 on the next page, which depicts the placement of the training and testing
+blocks (periods) along the time axis.
+Figure 1: Walkforward testing with short and long test periods
+Figure 1 above shows two situations. The top section of the figure depicts
+walkforward with very short test blocks. The bottom section depicts very long
+test blocks. It can be useful to perform several walkforward tests of varying test
+block lengths in order to evaluate the degree to which the prediction model is
+robust against nonstationarity.
+Walkforward testing has only one disadvantage relative to alternative testing
+methods such as cross validation: it is relatively inefficient when it comes to
+use of the available data. Only cases past the end of the first training block are
+ever used for testing. If you are willing to believe that the indicators and targets
+are reasonably stationary, this is a tragic waste of data. Cross validation,
+discussed in the next section, addresses this weakness.
+Cross Validation
+Rather than segregating all test cases at the end of the historical data block, as is
+done with walkforward testing, we can evenly distribute them throughout the
+available history. This is called cross validation. For example, we may test as
+follows:
+1) Train using data from 2006 through 2008. Test the model on 2005 data.
+2) Train using data from 2005 through 2008, excluding 2006. Test the model on
+2006 data.
+3) Train using data from 2005 through 2008, excluding 2007. Test the model on
+2007 data.
+4) Train using data from 2005 through 2008, excluding 2008. Test the model on
+2008 data.
+This idea of withholding interior ‘test’ blocks of data while training with the
+surrounding data is illustrated in Figure 2 below. In cross validation, each step
+is commonly called a fold.
+Figure 2: Cross validation
+The obvious advantage of cross validation over walkforward testing is that
+every available case becomes a test case at some point. However, there are
+several disadvantages to note. The most serious potential problem is that cross
+validation is sensitive to nonstationarity. In a walkforward test, only relatively
+recent cases serve as test subjects. But in cross validation, cases all the way
+back to the beginning of the dataset contribute to test performance results. If the
+behavior of the market in early days was so different than in later days that the
+relationship between indicators and the target has seriously changed,
+incorporating test results from those early days may not be advisable.
+Another disadvantage is more philosophical than practical, but it is worthy of
+note. Unlike a walkforward test, cross validation does not mimic the real-life
+behavior of a trading system. In cross validation, except for the last fold, we are
+using data from the future to train the model being tested. In real life this data
+would not be known at the time that test cases are processed. Some skeptics
+will raise their eyebrows at this, even though when done correctly it is
+legitimate, providing nearly unbiased performance estimates. Finally, overlap
+problems, discussed in the next section, are more troublesome in cross
+validation than in walkforward tests.
+Overlap Considerations
+The discussions of cross validation and walkforward testing just presented
+assume that each case is independent of other cases. In other words, the
+assumption is that the values of variables for a case are not related to the values
+of other cases in the dataset. Unfortunately, this is almost never the situation.
+Cases that are near one another in time will tend to have similar values of
+indicators and/or targets. This generally comes about in one or both of the
+following ways:
+• Many of the targets available in TSSB look further ahead than just the next
+bar. For example, suppose our target is the market trend over the next ten
+bars. This is the quantity we wish to predict in order to make trade
+decisions. If this value is high on a particular day, indicating that the
+market trends strongly upward over the subsequent ten days, then in all
+likelihood this value will also be high the following day, and it was
+probably high the prior day. Shifting ahead or back one day still leaves an
+overlap of nine days in that ten-day target window. Such case-to-case
+correlation in time series data is called serial correlation.
+• In most trading systems, the indicators look back over a considerable time
+block. For example, an indicator may be the market trend over the prior 50
+days, or a measure of volatility over the prior 100 days. As a result,
+indicators change very slowly over time. The values of indicators for a
+particular day are almost identical to the values in nearby days, before and
+after.
+These facts have several important implications. Because indicators change
+only slowly, the model’s predictions also change slowly. Hence market
+positions change slowly; if a prediction is above a threshold, it will tend to
+remain above the threshold for multiple bars. Conversely, if a prediction is
+below a threshold, it will tend to remain below that threshold for some time. If
+the target is looking ahead more than one bar, which results in serial correlation
+as discussed above, then the result of serial correlation in both positions and
+targets is serial correlation in returns for the trading system. This immediately
+invalidates most common statistical significance tests such as the t-test, ordinary
+bootstrap, and Monte-Carlo permutation test. TSSB does include several
+statistical significance tests that can lessen the impact of serial correlation. In
+particular, the stationary bootstrap and tapered block bootstrap will be
+discussed here. Unfortunately, both of these tests rely on assumptions that are
+often shaky. We’ll return to this issue in more detail later when statistical tests
+are discussed. For the moment, understand that targets that look ahead more than
+one bar usually preclude tests of significance or force one to rely on tests having
+questionable validity.
+Lack of independence in indicators and targets has another implication, this one
+potentially more serious than just invalidating significance tests. The legitimacy
+of the test results themselves can be undermined by bias. Luckily, this problem
+is easily solved with a TSSB option called OVERLAP. This will be discussed
+here. For now we will simply explore the nature of the problem.
+The problem occurs near the boundaries between training data and test data. The
+simplest situation is for walkforward testing, because there is only one (moving)
+boundary. Suppose the target involves market movement ten days into the future.
+Consider the last case in the training block. Its target involves the first ten days
+after the test block begins. This case, like all training set cases, plays a role in
+the development of the predictive model. Now consider the case that
+immediately follows it, the first case in the test block. As has already been
+noted, its indicator values will be very similar to the indicator values of the
+prior case. Thus, the model’s prediction will also be similar to that of the prior
+case. Because the target looks ahead ten days and we have moved ahead only
+one day, leaving a nine-day overlap, the target for this test case will be similar
+to the target for the prior case. But the prior case, which is practically identical
+to this test case, took part in the training of the model! So we have a strong
+prejudice for the model to do a good job of predicting this case, whose
+indicators and target are similar to the training case. The result is optimistic
+bias, the worst sort. Our test results will exceed the results that would have
+been obtained from an honest test.
+This boundary effect manifests itself in an additional fashion in cross validation.
+Of course, we still have the effect just described when we are near the end of
+the early section of the training set and the start of the test set. This is the left
+edge of the red regions in Figure 2. But we also have a boundary effect when we
+are near the end of the test set and the start of the later part of the training set.
+This is the right edge of each red region. As before, cases near each other but on
+opposite sides of the training set / test set boundary have similar values for
+indicators and the target, which results in optimistic bias in the performance
+estimate.
+The bottom line is that bias due to overlap at the boundary between training data
+and test data is a serious problem for both cross validation and walkforward
+testing. Fortunately, the user can invoke the OVERLAP option to alleviate this
+problem, as will be discussed here.
+Performance Criteria
+Prior sections discussed the evaluation of performance using cross validation or
+walkforward testing. Those sections dealt with the mechanics of partitioning the
+data into training and test sets. Other considerations will be presented here.
+Several terms should be defined first:
+• A fold is a single partitioning of the available data into a training set, a test
+set, and perhaps some cases from the dataset that are temporarily omitted
+in order to handle overlap. In Figures 1 and 2, a fold would be one of the
+horizontal strips consisting of the green training block and the red test
+block.
+• The in-sample (or IS) performance for a fold is the performance of the
+model or trading system in the current training set. Because the training
+process for the model optimized some aspect of its performance, the insample
+performance will usually have an optimistic bias, often called the
+training bias.
+• The out-of-sample (or OOS) performance for a fold is the performance of
+the model or trading system in the current test set. Because this data did
+not take part in training the model, it is, for all practical purposes,
+unbiased. In other words, on average it will reflect the true capability of
+the model or trading system.
+Model Performance Versus Financial Performance
+Performance statistics for model-based trading systems fall into two categories.
+One is the predictive performance of the model that determines trade decisions.
+This may include statistics such as the mean squared error of the predictions, or
+the model’s R-squared. The other is the financial performance of the trading
+system, such as its profit factor or Sharpe ratio. Naturally, there is a degree of
+correspondence between statistics in these two categories. If a model has
+excellent performance, the trading system probably will as well. By the same
+token, a poorly performing model will most likely produce a poorly performing
+trading system.
+On the other hand, the degree of correspondence between model and trade
+performance may not always be as high as one might expect. For example, the
+venerable R-squared is a staple in many fields. Yet it has a shockingly low
+relationship with the profit factor of the trading system, a commonly used
+measure of financial performance. In fact, it is not uncommon for a model-based
+trading system with respectable financial performance to be driven by a
+predictive model that has a negative R-squared! (Roughlyspeaking, a negative
+R-squaredmeans that the model’s error variance exceeds that of just guessing the
+target mean for every case.) This peculiar behavior happens because trades are
+signaled only for extremely high or low predictions, which are almost always
+the most reliable decisions. For less extreme predictions, those lying between
+the short and long thresholds where no trades are taken, errors can be so large
+that they overwhelm the predictive quality at the extremes. The result is a
+negative R-square.
+Because of this frequent discrepancy, financial performance statistics for the
+trading system, such as profit factor, are much more useful than predictive
+performance of the model. Nonetheless, model accuracy is of some interest and
+should always be examined, if for no other reason than to check for anomalous
+behavior.
+Financial Relevance and Generalizability
+Performance statistics, especially for the trading system, can be graded on two
+scales: financial relevance and generalizability. This is not to say that these
+two criteria are mutually exclusive, or even at opposing ends of a continuum.
+Still, they are often independent of one another, and some discussion is
+warranted.
+A financially relevant statistic is one that is important from a profit-making or
+money management perspective. For example, the ratio of annual percent return
+to average annual drawdown is of

@@ -1,0 +1,87 @@
+Code Review and Final Refinements
+Let's look at the specifics.
+1. Critical Bug in with_iso_timestamp
+There is a subtle bug in with_iso_timestamp related to const correctness.
+The Problem:
+The method is const, meaning it cannot modify the object's cpu_table_. However, you are using the member variable cpu_table_ to add the new column, instead of the local, non-const cpu_df you created.
+code
+C++
+// analytics_dataframe.cpp -> with_iso_timestamp()
+
+arrow::Result<AnalyticsDataFrame> AnalyticsDataFrame::with_iso_timestamp(
+    //...
+) const {
+    // This creates a local, non-const copy of the dataframe on the CPU.
+    ARROW_ASSIGN_OR_RAISE(auto cpu_df, to_cpu()); 
+
+    // ... logic to create the iso_column ...
+
+    // BUG: This uses the original object's cpu_table_, which is part of a `const` object.
+    // This should be adding the column to the local `cpu_df`'s table.
+    ARROW_ASSIGN_OR_RAISE(auto new_table, cpu_table_->AddColumn(cpu_table_->num_columns(), iso_field, iso_column));
+    return create_from_cpu_table(new_table);
+}
+The Fix:
+You need to operate on the local cpu_df object's table, which is mutable.
+code
+C++
+// analytics_dataframe.cpp -> with_iso_timestamp() [Corrected]
+
+arrow::Result<AnalyticsDataFrame> AnalyticsDataFrame::with_iso_timestamp(
+    const std::string& output_column_name,
+    TimeFormat time_format) const {
+
+    ARROW_ASSIGN_OR_RAISE(auto cpu_df, to_cpu());
+    // ... (logic to create df_with_unix and iso_column is correct) ...
+    auto iso_column = iso_datum.chunked_array();
+    auto iso_field = arrow::field(output_column_name, arrow::utf8());
+
+    // DIAGNOSTIC: Operate on the local `cpu_df`'s table, not the `const` member `cpu_table_`.
+    auto original_table = cpu_df.get_cpu_table();
+    ARROW_ASSIGN_OR_RAISE(auto new_table, original_table->AddColumn(original_table->num_columns(), iso_field, iso_column));
+    
+    // Now, create the final result from the local cpu_df's context.
+    return cpu_df.create_from_cpu_table(new_table);
+}
+This is a key fix to ensure the function works correctly and respects const.
+2. Missing Header in column_view.h
+This is a minor point, but important for portability and clean C++.
+The Problem:
+You've used typeid(T).name() in your error message, which is a great addition for debugging. However, this function requires the <typeinfo> header. Your code likely compiles because another header you've included happens to include it, but you should not rely on such transitive includes.
+The Fix:
+Add the include to column_view.h.
+code
+C++
+// column_view.h [Corrected]
+
+#pragma once
+
+#include <memory>
+#include <cstddef>
+#include <typeinfo> // DIAGNOSTIC: Add this header for typeid
+#include <arrow/table.h>
+// ... other includes
+3. Minor Simplification in column_view.h
+Your logic for handling multi-chunk arrays is perfectly correct. As a small style refinement, you can get the vector of chunks directly from the ChunkedArray object instead of building it in a loop. This is just a bit more concise.
+Current Code (Correct):
+code
+C++
+// ...
+} else {
+    // Combine chunks into a single array
+    std::vector<std::shared_ptr<arrow::Array>> chunks;
+    for (int i = 0; i < column->num_chunks(); ++i) {
+        chunks.push_back(column->chunk(i));
+    }
+    auto combined_result = arrow::Concatenate(chunks);
+    // ...
+}
+Slightly More Concise Version:
+code
+C++
+// ...
+} else {
+    // arrow::ChunkedArray::chunks() returns the vector directly.
+    auto combined_result = arrow::Concatenate(column->chunks());
+    // ...
+}

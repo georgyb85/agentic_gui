@@ -1,0 +1,20 @@
+when timeseries window has loaded data, user shall be able to run simulation. for that new widget window opens, i want you to develop  that widget.
+
+you can find code in xg.txt - that is trade simulation using xgboost for predictie model, which shall be implemented in this project. main functions are testSingleFold and runWalkForwardValidation. in runWalkForwardValidation there are some examples of single fodl and 3 folds - you shall ignore these. resulting 
+walkforward test shall be like from the loop         for (int i = 50; i < 750; ++i) {
+            int train_start = 6000 + i * 200;
+            int train_end = 16000 + i * 200;
+            int test_start = 16009 + i * 200;
+            int test_end = 16209 + i * 200;
+
+but max number of folds (in this example - 750) shall be devised from number of rows read in timeseries window.
+there should be gui element showing all column names except those starting with "tgt" or "TGT" and user can select multiple elements - these would go as feature_columns in initializeFeatureColumns in BTCPredictor
+there should be anothe control that shows columns starting with "tgt" or "TGT" - and user shall be able to pick just one - that will be target_column in initializeFeatureColumns
+other controls shall allow user to select model hyperparameters - learning_rate, max_depth and so on
+
+when user selects features, target he can start simulation - which will run walkforward loop. there should be separate widget (separate class/file) - simulation reuslt - that displays plot of the trades and table that displays some FoldResult data
+these should be updated in real time as simulation progresses. table shall be scrollable, so it doesn't grow uncontrollable and its displayed values shall be cached as chars/strings to avoid string constructors on every frame. plot should be 
+live plot whose range is dynamically adjusted as new folds arrive. it should plot fold number (x axis) vs profit(y-axis, which is printed to the consolse as  Running sum in xg.txt's code).
+
+accuracy of simulation is the most important, so the logic of the algorithm in xg.txt shall be replicated as close as possible (except reporting sample 3 folds), and except readinf file from disk - the file is read within timeserieswindow, we'll need only to load columns from 
+that data that user specified.

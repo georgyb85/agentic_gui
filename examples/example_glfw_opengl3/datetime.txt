@@ -1,0 +1,227 @@
+Part 1: The Crash - A Simpler, More Robust Timestamp Function
+The current with_iso_timestamp is too complex. We will replace it with a much simpler version that directly constructs the necessary string components and is more resilient to different integer Time formats.
+Action: Replace the entire with_iso_timestamp function in analytics_dataframe.cpp with this new version.
+File: analytics_dataframe.cpp
+code
+C++
+arrow::Result<AnalyticsDataFrame> AnalyticsDataFrame::with_iso_timestamp(
+    const std::string& output_column_name,
+    TimeFormat time_format) const {
+    
+    if (!has_tssb_metadata()) {
+        return arrow::Status::Invalid("TSSB metadata not set");
+    }
+    if (!cpu_table_) {
+        return arrow::Status::Invalid("No data available");
+    }
+    
+    auto date_column = cpu_table_->GetColumnByName(*tssb_date_column_);
+    if (!date_column) {
+        return arrow::Status::Invalid("Date column not found: ", *tssb_date_column_);
+    }
+    arrow::Datum date_datum(date_column);
+    arrow::Datum time_datum;
+
+    bool has_time = (time_format != TimeFormat::NONE);
+    if (has_time) {
+        auto time_column = cpu_table_->GetColumnByName(*tssb_time_column_);
+        if (!time_column) {
+            return arrow::Status::Invalid("Time column not found: ", *tssb_time_column_);
+        }
+        time_datum = arrow::Datum(time_column);
+    }
+
+    // --- Date Components (YYYY, MM, DD) ---
+    ARROW_ASSIGN_OR_RAISE(auto year, arrow::compute::CallFunction("divide", {date_datum, arrow::MakeScalar(10000)}));
+    ARROW_ASSIGN_OR_RAISE(auto month_rem, arrow::compute::CallFunction("subtract", {date_datum, arrow::compute::CallFunction("multiply", {year, arrow::MakeScalar(10000)}).ValueOrDie()}));
+    ARROW_ASSIGN_OR_RAISE(auto month, arrow::compute::CallFunction("divide", {month_rem, arrow::MakeScalar(100)}));
+    ARROW_ASSIGN_OR_RAISE(auto day, arrow::compute::CallFunction("subtract", {date_datum, arrow::compute::CallFunction("multiply", {arrow::compute::CallFunction("floor", {arrow::compute::CallFunction("divide", {date_datum, arrow::MakeScalar(100)}).ValueOrDie()}).ValueOrDie(), arrow::MakeScalar(100)}).ValueOrDie()}));
+
+    // --- Time Components (HH, MM, SS) - Calculated differently based on format ---
+    arrow::Datum hour, minute, second;
+    if (has_time) {
+        if (time_format == TimeFormat::HHMM) {
+            ARROW_ASSIGN_OR_RAISE(hour, arrow::compute::CallFunction("floor", {arrow::compute::CallFunction("divide", {time_datum, arrow::MakeScalar(100)}).ValueOrDie()}));
+            ARROW_ASSIGN_OR_RAISE(auto hour_term, arrow::compute::CallFunction("multiply", {hour, arrow::MakeScalar(100)}));
+            ARROW_ASSIGN_OR_RAISE(minute, arrow::compute::CallFunction("subtract", {time_datum, hour_term}));
+            ARROW_ASSIGN_OR_RAISE(second, arrow::MakeArrayFromScalar(*arrow::MakeScalar(0), date_column->length()));
+        } else { // HHMMSS
+            ARROW_ASSIGN_OR_RAISE(hour, arrow::compute::CallFunction("floor", {arrow::compute::CallFunction("divide", {time_datum, arrow::MakeScalar(10000)}).ValueOrDie()}));
+            ARROW_ASSIGN_OR_RAISE(auto hour_term, arrow::compute::CallFunction("multiply", {hour, arrow::MakeScalar(10000)}));
+            ARROW_ASSIGN_OR_RAISE(auto minute_rem, arrow::compute::CallFunction("subtract", {time_datum, hour_term}));
+            ARROW_ASSIGN_OR_RAISE(minute, arrow::compute::CallFunction("floor", {arrow::compute::CallFunction("divide", {minute_rem, arrow::MakeScalar(100)}).ValueOrDie()}));
+            ARROW_ASSIGN_OR_RAISE(auto minute_term, arrow::compute::CallFunction("multiply", {arrow::compute::CallFunction("floor", {arrow::compute::CallFunction("divide", {time_datum, arrow::MakeScalar(100)}).ValueOrDie()}).ValueOrDie(), arrow::MakeScalar(100)}));
+            ARROW_ASSIGN_OR_RAISE(second, arrow::compute::CallFunction("subtract", {time_datum, minute_term}));
+        }
+    } else { // No time column
+        ARROW_ASSIGN_OR_RAISE(hour, arrow::MakeArrayFromScalar(*arrow::MakeScalar(0), date_column->length()));
+        ARROW_ASSIGN_OR_RAISE(minute, arrow::MakeArrayFromScalar(*arrow::MakeScalar(0), date_column->length()));
+        ARROW_ASSIGN_OR_RAISE(second, arrow::MakeArrayFromScalar(*arrow::MakeScalar(0), date_column->length()));
+    }
+
+    // --- Convert all components to strings ---
+    auto cast_to_string = arrow::compute::CastOptions::Safe(arrow::utf8());
+    ARROW_ASSIGN_OR_RAISE(auto year_str, arrow::compute::CallFunction("cast", {year}, &cast_to_string));
+    ARROW_ASSIGN_OR_RAISE(auto month_str, arrow::compute::CallFunction("cast", {month}, &cast_to_string));
+    ARROW_ASSIGN_OR_RAISE(auto day_str, arrow::compute::CallFunction("cast", {day}, &cast_to_string));
+    ARROW_ASSIGN_OR_RAISE(auto hour_str, arrow::compute::CallFunction("cast", {hour}, &cast_to_string));
+    ARROW_ASSIGN_OR_RAISE(auto minute_str, arrow::compute::CallFunction("cast", {minute}, &cast_to_string));
+    ARROW_ASSIGN_OR_RAISE(auto second_str, arrow::compute::CallFunction("cast", {second}, &cast_to_string));
+
+    // --- Pad strings for correct formatting ---
+    arrow::compute::PadOptions pad_options(2, "0");
+    ARROW_ASSIGN_OR_RAISE(auto month_padded, arrow::compute::CallFunction("utf8_lpad", {month_str}, &pad_options));
+    ARROW_ASSIGN_OR_RAISE(auto day_padded, arrow::compute::CallFunction("utf8_lpad", {day_str}, &pad_options));
+    ARROW_ASSIGN_OR_RAISE(auto hour_padded, arrow::compute::CallFunction("utf8_lpad", {hour_str}, &pad_options));
+    ARROW_ASSIGN_OR_RAISE(auto minute_padded, arrow::compute::CallFunction("utf8_lpad", {minute_str}, &pad_options));
+    ARROW_ASSIGN_OR_RAISE(auto second_padded, arrow::compute::CallFunction("utf8_lpad", {second_str}, &pad_options));
+
+    // --- Build final ISO string by joining all parts ---
+    auto len = date_column->length();
+    ARROW_ASSIGN_OR_RAISE(auto dash, arrow::MakeArrayFromScalar(*arrow::MakeScalar("-"), len));
+    ARROW_ASSIGN_OR_RAISE(auto t_sep, arrow::MakeArrayFromScalar(*arrow::MakeScalar("T"), len));
+    ARROW_ASSIGN_OR_RAISE(auto colon, arrow::MakeArrayFromScalar(*arrow::MakeScalar(":"), len));
+
+    std::vector<arrow::Datum> concat_parts = {
+        year_str, dash, month_padded, dash, day_padded, t_sep,
+        hour_padded, colon, minute_padded, colon, second_padded
+    };
+    ARROW_ASSIGN_OR_RAISE(auto iso_datum, arrow::compute::CallFunction("binary_join_element_wise", concat_parts));
+    
+    auto iso_column = iso_datum.chunked_array();
+    auto iso_field = arrow::field(output_column_name, arrow::utf8());
+    ARROW_ASSIGN_OR_RAISE(auto new_table, cpu_table_->AddColumn(cpu_table_->num_columns(), iso_field, iso_column));
+
+    return create_from_cpu_table(new_table);
+}
+Part 2: The Performance (4 FPS) - Reinstating the Display Cache
+This is non-negotiable for a smooth UI. We will add the cache back.
+Action 1: Update TimeSeriesWindow.h to include the cache and its helper function.
+File: TimeSeriesWindow.h
+code
+C++
+#pragma once
+
+#include "imgui.h"
+#include "implot.h"
+#include "analytics_dataframe.h"
+#include "dataframe_io.h"
+#include <string>
+#include <vector>
+#include <memory>
+#include <future>
+#include <chrono>
+
+class HistogramWindow;
+
+class TimeSeriesWindow {
+public:
+    TimeSeriesWindow();
+    ~TimeSeriesWindow() = default;
+
+    void Draw();
+    // ... other public methods ...
+    
+private:
+    // ... other private methods ...
+    void UpdateDisplayCache(); // Add this helper function
+
+    // ... other private members ...
+    
+    // High-performance display cache for the table
+    std::vector<std::vector<std::string>> m_displayCache;
+
+    chronosflow::TimeFormat m_detectedTimeFormat;
+};
+Action 2: Implement the caching logic in TimeSeriesWindow.cpp.
+File: TimeSeriesWindow.cpp
+code
+C++
+// Add the implementation for UpdateDisplayCache
+void TimeSeriesWindow::UpdateDisplayCache() {
+    m_displayCache.clear();
+    if (!m_dataFrame) return;
+
+    auto table = m_dataFrame->get_cpu_table();
+    if (!table) return;
+
+    const size_t numRows = std::min(static_cast<size_t>(MAX_DISPLAY_ROWS), static_cast<size_t>(table->num_rows()));
+    const int numColumns = table->num_columns();
+    
+    m_displayCache.resize(numRows);
+    for (size_t row = 0; row < numRows; ++row) {
+        m_displayCache[row].resize(numColumns);
+        for (int col = 0; col < numColumns; ++col) {
+            auto column_data = table->column(col);
+            auto scalar_result = column_data->GetScalar(row);
+            if (scalar_result.ok()) {
+                auto scalar = scalar_result.ValueOrDie();
+                if (scalar->is_valid) {
+                    m_displayCache[row][col] = scalar->ToString();
+                } else {
+                    m_displayCache[row][col] = "N/A";
+                }
+            } else {
+                m_displayCache[row][col] = "[Error]";
+            }
+        }
+    }
+}
+
+// In the Draw() function, call UpdateDisplayCache after a successful load
+void TimeSeriesWindow::Draw() {
+    // ...
+    if (m_isLoading && m_loadingFuture.valid() && ...) {
+        if (result.ok()) {
+            // ... (your existing logic to set up m_dataFrame and detect time format)
+            
+            m_dataFrame = std::move(df);
+            m_columnHeaders = m_dataFrame->column_names();
+
+            UpdateDisplayCache(); // <<<--- ADD THIS CALL HERE
+
+            // ...
+        } // ...
+    }
+    // ...
+}
+
+// In ClearData(), clear the cache
+void TimeSeriesWindow::ClearData() {
+    m_dataFrame.reset();
+    m_displayCache.clear(); // <<<--- ADD THIS CALL HERE
+    // ...
+}
+
+// Finally, modify DrawDataTable to use the cache
+void TimeSeriesWindow::DrawDataTable() {
+    if (m_columnHeaders.empty() || m_displayCache.empty()) return;
+
+    const size_t numRows = m_displayCache.size();
+    const int numColumns = static_cast<int>(m_columnHeaders.size());
+
+    if (ImGui::BeginTable("TimeSeriesTable", numColumns, m_tableFlags)) {
+        // ... (Header setup is the same)
+
+        ImGuiListClipper clipper;
+        clipper.Begin(numRows);
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                ImGui::TableNextRow();
+                for (int col = 0; col < numColumns; ++col) {
+                    ImGui::TableSetColumnIndex(col);
+                    // --- PERFORMANCE FIX: Read from cache ---
+                    ImGui::TextUnformatted(m_displayCache[row][col].c_str());
+
+                    if (col == m_selectedColumnIndex) {
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+                    }
+                }
+            }
+        }
+        
+        // ... (Pagination is the same) ...
+        ImGui::EndTable();
+    }
+}
+By applying these two fixes, you will resolve both the critical timestamp parsing crash and the severe performance degradation. The application will be stable, and the UI will be fluid and responsive again.
