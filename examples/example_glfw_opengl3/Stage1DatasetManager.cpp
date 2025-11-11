@@ -1,18 +1,16 @@
 #include "Stage1DatasetManager.h"
 
+#include "QuestDbDataFrameGateway.h"
 #include "Stage1RestClient.h"
 #include "TimeSeriesWindow.h"
 #include "candlestick_chart.h"
 #include "stage1_metadata_writer.h"
 #include "analytics_dataframe.h"
 #include "imgui.h"
-#include <arrow/csv/writer.h>
-#include <arrow/io/api.h>
 #include <cstring>
 #include <cstdio>
-#include <chrono>
 #include <cctype>
-#include <thread>
+#include <chrono>
 
 namespace {
 
@@ -21,41 +19,6 @@ std::string ToDisplay(const std::string& value) {
         return "-";
     }
     return value;
-}
-
-bool DataFrameToCsv(const chronosflow::AnalyticsDataFrame& frame,
-                    std::string* csvOut,
-                    std::string* error) {
-    if (!csvOut) {
-        if (error) *error = "CSV output buffer is null.";
-        return false;
-    }
-    auto table = frame.get_cpu_table();
-    if (!table) {
-        if (error) *error = "AnalyticsDataFrame does not contain a CPU table.";
-        return false;
-    }
-    auto maybeStream = arrow::io::BufferOutputStream::Create();
-    if (!maybeStream.ok()) {
-        if (error) *error = maybeStream.status().ToString();
-        return false;
-    }
-    std::shared_ptr<arrow::io::BufferOutputStream> stream = *maybeStream;
-    auto options = arrow::csv::WriteOptions::Defaults();
-    options.include_header = true;
-    auto status = arrow::csv::WriteCSV(*table, options, stream.get());
-    if (!status.ok()) {
-        if (error) *error = status.ToString();
-        return false;
-    }
-    auto maybeBuffer = stream->Finish();
-    if (!maybeBuffer.ok()) {
-        if (error) *error = maybeBuffer.status().ToString();
-        return false;
-    }
-    auto buffer = *maybeBuffer;
-    csvOut->assign(reinterpret_cast<const char*>(buffer->data()), buffer->size());
-    return true;
 }
 
 } // namespace
@@ -355,66 +318,25 @@ void Stage1DatasetManager::ExportCurrentDataset() {
         return;
     }
 
-    std::string indicatorCsv;
-    std::string csvError;
-    if (!DataFrameToCsv(*indicatorFrame, &indicatorCsv, &csvError)) {
-        m_statusMessage = csvError.empty() ? "Failed to serialize indicator dataset." : csvError;
+    questdb::DataFrameGateway gateway;
+    questdb::ExportResult indicatorExport;
+    questdb::ExportSpec indicatorSpec;
+    indicatorSpec.measurement = indicatorMeasurement;
+    indicatorSpec.timestamp_column = "timestamp_unix";
+    std::string questdbError;
+    if (!gateway.Export(*indicatorFrame, indicatorSpec, &indicatorExport, &questdbError)) {
+        m_statusMessage = "Failed to export indicator data: " + (questdbError.empty() ? "unknown QuestDB error." : questdbError);
         m_statusSuccess = false;
         return;
     }
 
-    std::string ohlcvCsv;
-    if (!DataFrameToCsv(*ohlcvFrame, &ohlcvCsv, &csvError)) {
-        m_statusMessage = csvError.empty() ? "Failed to serialize OHLCV dataset." : csvError;
+    questdb::ExportResult ohlcvExport;
+    questdb::ExportSpec ohlcvSpec;
+    ohlcvSpec.measurement = ohlcvMeasurement;
+    ohlcvSpec.timestamp_column = "timestamp_unix";
+    if (!gateway.Export(*ohlcvFrame, ohlcvSpec, &ohlcvExport, &questdbError)) {
+        m_statusMessage = "Failed to export OHLCV data: " + (questdbError.empty() ? "unknown QuestDB error." : questdbError);
         m_statusSuccess = false;
-        return;
-    }
-
-    stage1::RestClient& api = stage1::RestClient::Instance();
-    auto waitForJob = [&](const std::string& jobId, const std::string& label) -> bool {
-        constexpr int kMaxAttempts = 120;
-        for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-            stage1::JobStatus status;
-            std::string error;
-            if (!api.GetJobStatus(jobId, &status, &error)) {
-                m_statusMessage = "Failed to query Stage1 job (" + label + "): " + error;
-                m_statusSuccess = false;
-                return false;
-            }
-            if (status.status == "COMPLETED") {
-                return true;
-            }
-            if (status.status == "FAILED" || status.status == "CANCELLED") {
-                m_statusMessage = "Stage1 job (" + label + ") " + status.status;
-                if (!status.error.empty()) {
-                    m_statusMessage += ": " + status.error;
-                }
-                m_statusSuccess = false;
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-        m_statusMessage = "Timed out waiting for Stage1 job completion (" + label + ").";
-        m_statusSuccess = false;
-        return false;
-    };
-
-    std::string jobId;
-    if (!api.SubmitQuestDbImport(indicatorMeasurement, indicatorCsv, indicatorMeasurement + ".csv", &jobId, &csvError)) {
-        m_statusMessage = "Failed to upload indicator data: " + csvError;
-        m_statusSuccess = false;
-        return;
-    }
-    if (!waitForJob(jobId, "indicator data")) {
-        return;
-    }
-
-    if (!api.SubmitQuestDbImport(ohlcvMeasurement, ohlcvCsv, ohlcvMeasurement + ".csv", &jobId, &csvError)) {
-        m_statusMessage = "Failed to upload OHLCV data: " + csvError;
-        m_statusSuccess = false;
-        return;
-    }
-    if (!waitForJob(jobId, "ohlcv data")) {
         return;
     }
 

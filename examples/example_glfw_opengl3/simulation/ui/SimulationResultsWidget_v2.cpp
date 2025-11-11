@@ -234,13 +234,13 @@ void SimulationResultsWidget_v2::DrawCurrentRunStatus() {
             // Calculate statistics
             float totalReturn = 0.0f;
             int totalLongSignals = 0, totalShortSignals = 0;
-            float avgLongHitRate = 0.0f, avgShortHitRate = 0.0f;
+            double totalLongHits = 0.0;
+            double totalShortHits = 0.0;
             int totalFolds = run.foldResults.size();
             float totalWins = 0.0f, totalLosses = 0.0f;
             float totalShortWins = 0.0f, totalShortLosses = 0.0f;
             
             if (totalFolds > 0) {
-                int foldsWithLongSignals = 0, foldsWithShortSignals = 0;
                 for (const auto& fold : run.foldResults) {
                     totalReturn += fold.signal_sum + fold.short_signal_sum;
                     totalLongSignals += fold.n_signals;
@@ -250,30 +250,24 @@ void SimulationResultsWidget_v2::DrawCurrentRunStatus() {
                     totalShortWins += fold.sum_short_wins;
                     totalShortLosses += fold.sum_short_losses;
                     if (fold.n_signals > 0) {
-                        avgLongHitRate += fold.hit_rate;
-                        foldsWithLongSignals++;
+                        totalLongHits += static_cast<double>(fold.hit_rate) * static_cast<double>(fold.n_signals);
                     }
                     if (fold.n_short_signals > 0) {
-                        avgShortHitRate += fold.short_hit_rate;
-                        foldsWithShortSignals++;
+                        totalShortHits += static_cast<double>(fold.short_hit_rate) * static_cast<double>(fold.n_short_signals);
                     }
-                }
-                if (foldsWithLongSignals > 0) {
-                    avgLongHitRate /= foldsWithLongSignals;
-                }
-                if (foldsWithShortSignals > 0) {
-                    avgShortHitRate /= foldsWithShortSignals;
                 }
             }
             
             int totalSignals = totalLongSignals + totalShortSignals;
-            float avgTotalHitRate = 0.0f;
-            if (totalSignals > 0) {
-                // Calculate weighted average hit rate
-                float totalHits = (avgLongHitRate * totalLongSignals) + 
-                                 (avgShortHitRate * totalShortSignals);
-                avgTotalHitRate = totalHits / totalSignals;
-            }
+            const float avgLongHitRate = (totalLongSignals > 0)
+                ? static_cast<float>(totalLongHits / static_cast<double>(totalLongSignals))
+                : 0.0f;
+            const float avgShortHitRate = (totalShortSignals > 0)
+                ? static_cast<float>(totalShortHits / static_cast<double>(totalShortSignals))
+                : 0.0f;
+            const float avgTotalHitRate = (totalSignals > 0)
+                ? static_cast<float>((totalLongHits + totalShortHits) / static_cast<double>(totalSignals))
+                : 0.0f;
             
             float pfLong = (totalLosses > 0) ? (totalWins / totalLosses) :
                            ((totalWins > 0) ? 999.0f : 0.0f);
