@@ -804,6 +804,8 @@ void Stage1DatasetManager::ExportCurrentDataset() {
     }
 
     // Create or update dataset on Stage1 server before uploading data
+    std::cout << "[Stage1DatasetManager] Creating dataset on server: " << resolvedDatasetId << std::endl;
+    std::cout << "[Stage1DatasetManager]   slug=" << slug << ", granularity=" << manifest.granularity << std::endl;
     std::string createError;
     if (!stage1::RestClient::Instance().CreateOrUpdateDataset(
             resolvedDatasetId,
@@ -815,12 +817,14 @@ void Stage1DatasetManager::ExportCurrentDataset() {
             manifest.first_indicator_timestamp_ms,
             manifestJson,
             &createError)) {
+        std::cout << "[Stage1DatasetManager] Failed to create dataset: " << createError << std::endl;
         m_statusMessage = createError.empty()
             ? "Failed to create dataset on Stage1 server."
             : createError;
         m_statusSuccess = false;
         return;
     }
+    std::cout << "[Stage1DatasetManager] Dataset created successfully on server" << std::endl;
 
     std::string uploadError;
     if (!UploadOhlcvRowsToStage1(resolvedDatasetId, &uploadError)) {

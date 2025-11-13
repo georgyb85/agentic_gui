@@ -730,10 +730,20 @@ bool RestClient::CreateOrUpdateDataset(const std::string& datasetId,
     builder["indentation"] = "";
     std::string body = Json::writeString(builder, payload);
 
+    std::cout << "[RestClient] POST /api/datasets" << std::endl;
+    std::cout << "[RestClient]   URL: " << m_baseUrl << "/api/datasets" << std::endl;
+    std::cout << "[RestClient]   Payload size: " << body.size() << " bytes" << std::endl;
+
     long status = 0;
     std::string response;
     if (!Execute("POST", "/api/datasets", body, {}, &status, &response, error)) {
+        std::cout << "[RestClient] Execute failed: " << (error ? *error : "unknown") << std::endl;
         return false;
+    }
+
+    std::cout << "[RestClient] Response: HTTP " << status << std::endl;
+    if (!response.empty()) {
+        std::cout << "[RestClient] Body: " << response << std::endl;
     }
 
     if (status < 200 || status >= 300) {
