@@ -976,9 +976,43 @@ bool Stage1DatasetManager::UploadOhlcvRowsToStage1(const std::string& datasetId,
     size_t totalRows = raw.size();
     std::cout << "[UploadOhlcvRows] Starting upload of " << totalRows << " OHLCV rows..." << std::endl;
 
+    // Debug: Check what unit candle.time is in
+    if (!raw.empty()) {
+        double firstTime = raw.front().time;
+        double lastTime = raw.back().time;
+        std::cout << "[UploadOhlcvRows] First candle.time: " << std::fixed << firstTime << std::endl;
+        std::cout << "[UploadOhlcvRows] Last candle.time: " << std::fixed << lastTime << std::endl;
+
+        // Check if it looks like seconds (< 10 billion) or milliseconds (> 100 billion)
+        if (firstTime > 100'000'000'000.0) {
+            std::cout << "[UploadOhlcvRows] WARNING: candle.time appears to be in milliseconds already!" << std::endl;
+        } else if (firstTime > 1'000'000'000.0 && firstTime < 10'000'000'000.0) {
+            std::cout << "[UploadOhlcvRows] candle.time appears to be in seconds (expected)" << std::endl;
+        } else {
+            std::cout << "[UploadOhlcvRows] WARNING: candle.time has unexpected magnitude!" << std::endl;
+        }
+    }
+
     for (const auto& candle : raw) {
         Json::Value row(Json::objectValue);
-        const int64_t timestampMs = static_cast<int64_t>(candle.time) * 1000LL;
+
+        // IMPORTANT: Check if candle.time is already in milliseconds
+        // If candle.time > 100 billion, it's likely already milliseconds
+        int64_t timestampMs;
+        if (candle.time > 100'000'000'000.0) {
+            // Already in milliseconds, don't multiply
+            timestampMs = static_cast<int64_t>(candle.time);
+            if (appended == 0) {
+                std::cout << "[UploadOhlcvRows] Using candle.time as-is (already milliseconds)" << std::endl;
+            }
+        } else {
+            // In seconds, convert to milliseconds
+            timestampMs = static_cast<int64_t>(candle.time) * 1000LL;
+            if (appended == 0) {
+                std::cout << "[UploadOhlcvRows] Converting candle.time from seconds to milliseconds" << std::endl;
+            }
+        }
+
         row["timestamp"] = static_cast<Json::Int64>(timestampMs);
         row["open"] = candle.open;
         row["high"] = candle.high;
