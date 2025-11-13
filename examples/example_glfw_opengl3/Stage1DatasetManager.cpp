@@ -128,7 +128,9 @@ std::optional<int64_t> ScalarToMillis(const std::shared_ptr<arrow::Scalar>& scal
     if (!scalar || !scalar->is_valid) {
         return std::nullopt;
     }
-    const bool coerceSeconds = true;
+    // NOTE: Backend already converts timestamps to milliseconds via EnsureTimestampMs
+    // DO NOT do additional conversion here or it will corrupt the data
+    const bool coerceSeconds = false;
     switch (scalar->type->id()) {
         case arrow::Type::INT64: {
             int64_t value = std::static_pointer_cast<arrow::Int64Scalar>(scalar)->value;
@@ -943,6 +945,9 @@ bool Stage1DatasetManager::UploadOhlcvRowsToStage1(const std::string& datasetId,
 
     Json::Value rows(Json::arrayValue);
     size_t appended = 0;
+    size_t totalRows = raw.size();
+    std::cout << "[UploadOhlcvRows] Starting upload of " << totalRows << " OHLCV rows..." << std::endl;
+
     for (const auto& candle : raw) {
         Json::Value row(Json::objectValue);
         const int64_t timestampMs = static_cast<int64_t>(candle.time) * 1000LL;
@@ -955,6 +960,8 @@ bool Stage1DatasetManager::UploadOhlcvRowsToStage1(const std::string& datasetId,
         rows.append(row);
         ++appended;
         if (rows.size() >= kStage1AppendBatchSize) {
+            std::cout << "[UploadOhlcvRows] Uploading batch " << (appended / kStage1AppendBatchSize)
+                      << " (" << appended << "/" << totalRows << " rows)..." << std::endl;
             if (!FlushRowBatch(datasetId, &rows, stage1::RestClient::AppendTarget::Ohlcv, error)) {
                 return false;
             }
@@ -967,6 +974,7 @@ bool Stage1DatasetManager::UploadOhlcvRowsToStage1(const std::string& datasetId,
         if (error) *error = "Uploaded zero OHLCV rows.";
         return false;
     }
+    std::cout << "[UploadOhlcvRows] Successfully uploaded " << appended << " OHLCV rows" << std::endl;
     return true;
 }
 
@@ -1043,6 +1051,8 @@ bool Stage1DatasetManager::UploadIndicatorRowsToStage1(const std::string& datase
     Json::Value rows(Json::arrayValue);
     int64_t totalRows = table->num_rows();
     size_t appended = 0;
+    std::cout << "[UploadIndicatorRows] Starting upload of up to " << totalRows << " indicator rows..." << std::endl;
+
     for (int64_t rowIndex = 0; rowIndex < totalRows; ++rowIndex) {
         auto tsScalarResult = timestampData->GetScalar(rowIndex);
         if (!tsScalarResult.ok()) {
@@ -1092,6 +1102,8 @@ bool Stage1DatasetManager::UploadIndicatorRowsToStage1(const std::string& datase
         rows.append(row);
         ++appended;
         if (rows.size() >= kStage1AppendBatchSize) {
+            std::cout << "[UploadIndicatorRows] Uploading batch " << (appended / kStage1AppendBatchSize)
+                      << " (" << appended << "/" << totalRows << " rows processed)..." << std::endl;
             if (!FlushRowBatch(datasetId, &rows, stage1::RestClient::AppendTarget::Indicators, error)) {
                 return false;
             }
@@ -1105,6 +1117,7 @@ bool Stage1DatasetManager::UploadIndicatorRowsToStage1(const std::string& datase
         if (error) *error = "Uploaded zero indicator rows.";
         return false;
     }
+    std::cout << "[UploadIndicatorRows] Successfully uploaded " << appended << " indicator rows" << std::endl;
     return true;
 }
 
