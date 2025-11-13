@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <json/json.h>
 
 namespace stage1 {
 
@@ -15,8 +16,12 @@ struct DatasetSummary {
     std::string source;
     std::string ohlcv_measurement;
     std::string indicator_measurement;
+    int64_t bar_interval_ms = 0;
+    int64_t lookback_rows = 0;
     int64_t ohlcv_row_count = 0;
     int64_t indicator_row_count = 0;
+    int64_t first_ohlcv_ts_ms = 0;
+    int64_t first_indicator_ts_ms = 0;
     std::string ohlcv_first_ts;
     std::string ohlcv_last_ts;
     std::string indicator_first_ts;
@@ -96,6 +101,11 @@ struct MeasurementInfo {
 
 class RestClient {
 public:
+    enum class AppendTarget {
+        Ohlcv,
+        Indicators
+    };
+
     static RestClient& Instance();
     ~RestClient();
 
@@ -108,6 +118,10 @@ public:
                        int offset,
                        std::vector<DatasetSummary>* datasets,
                        std::string* error);
+
+    bool FetchDataset(const std::string& datasetId,
+                      DatasetSummary* summary,
+                      std::string* error);
 
     bool FetchDatasetRuns(const std::string& datasetId,
                           int limit,
@@ -139,6 +153,21 @@ public:
                       std::vector<std::string>* columns,
                       std::vector<std::vector<std::string>>* rows,
                       std::string* error);
+
+    bool AppendDatasetRows(const std::string& datasetId,
+                           const Json::Value& payload,
+                           AppendTarget target,
+                           std::string* error);
+
+    bool CreateOrUpdateDataset(const std::string& datasetId,
+                               const std::string& datasetSlug,
+                               const std::string& granularity,
+                               int64_t barIntervalMs,
+                               int64_t lookbackRows,
+                               int64_t firstOhlcvTs,
+                               int64_t firstIndicatorTs,
+                               const std::string& metadataJson,
+                               std::string* error);
 
     bool ListMeasurements(const std::string& prefix,
                           std::vector<MeasurementInfo>* measurements,

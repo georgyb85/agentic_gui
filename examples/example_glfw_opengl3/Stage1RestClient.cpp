@@ -5,10 +5,12 @@
 #include <rapidjson/error/en.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <json/json.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <iomanip>
 #include <initializer_list>
@@ -106,6 +108,40 @@ std::string ValueToJsonString(const rapidjson::Value& value) {
     return buffer.GetString();
 }
 
+std::string FormatIsoTimestamp(int64_t millis) {
+    if (millis <= 0) {
+        return {};
+    }
+    std::time_t seconds = static_cast<std::time_t>(millis / 1000);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &seconds);
+#else
+    gmtime_r(&seconds, &tm);
+#endif
+    char buffer[32];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buffer;
+}
+
+std::string DefaultMeasurement(const std::string& slug, const char* suffix) {
+    if (slug.empty()) {
+        return suffix ? std::string(suffix) : std::string();
+    }
+    std::string sanitized;
+    sanitized.reserve(slug.size());
+    for (char ch : slug) {
+        if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-') {
+            sanitized.push_back(ch);
+        } else {
+            sanitized.push_back('_');
+        }
+    }
+    sanitized.push_back('_');
+    sanitized.append(suffix ? suffix : "");
+    return sanitized;
+}
+
 bool PopulateJobStatus(const rapidjson::Value& object, stage1::JobStatus* status) {
     if (!status || !object.IsObject()) {
         return false;
@@ -145,6 +181,119 @@ bool PopulateJobStatus(const rapidjson::Value& object, stage1::JobStatus* status
     status->updated_at = getString("updated_at");
     status->started_at = getString("started_at");
     status->completed_at = getString("completed_at");
+    return true;
+}
+
+bool ParseDatasetSummaryNode(const rapidjson::Value& item,
+                             stage1::DatasetSummary* summary) {
+    if (!summary || !item.IsObject()) {
+        return false;
+    }
+    auto getString = [&](const char* key) -> std::string {
+        auto it = item.FindMember(key);
+        if (it == item.MemberEnd()) {
+            return {};
+        }
+        return ValueToString(it->value);
+    };
+    auto getInt64 = [&](const char* key) -> int64_t {
+        auto it = item.FindMember(key);
+        if (it == item.MemberEnd()) {
+            return 0;
+        }
+        return ValueToInt64(it->value);
+    };
+    rapidjson::Document metadataDoc;
+    const rapidjson::Value* manifestNode = nullptr;
+    auto metadataIt = item.FindMember("metadata");
+    if (metadataIt != item.MemberEnd()) {
+        if (metadataIt->value.IsObject()) {
+            manifestNode = &metadataIt->value;
+        } else if (metadataIt->value.IsString()) {
+            metadataDoc.Parse(metadataIt->value.GetString());
+            if (!metadataDoc.HasParseError() && metadataDoc.IsObject()) {
+                manifestNode = &metadataDoc;
+            }
+        }
+    }
+    auto manifestString = [&](const char* key) -> std::string {
+        if (!manifestNode || !manifestNode->HasMember(key)) {
+            return {};
+        }
+        return ValueToString((*manifestNode)[key]);
+    };
+    auto manifestInt = [&](const char* key) -> int64_t {
+        if (!manifestNode || !manifestNode->HasMember(key)) {
+            return 0;
+        }
+        return ValueToInt64((*manifestNode)[key]);
+    };
+
+    summary->dataset_id = getString("dataset_id");
+    summary->dataset_slug = getString("dataset_slug");
+    summary->symbol = getString("symbol");
+    summary->granularity = getString("granularity");
+    summary->source = manifestString("source");
+    summary->bar_interval_ms = getInt64("bar_interval_ms");
+    if (summary->bar_interval_ms == 0) {
+        summary->bar_interval_ms = manifestInt("bar_interval_ms");
+    }
+    summary->lookback_rows = getInt64("lookback_rows");
+    if (summary->lookback_rows == 0) {
+        summary->lookback_rows = manifestInt("lookback_rows");
+    }
+    summary->first_ohlcv_ts_ms = getInt64("first_ohlcv_ts");
+    if (summary->first_ohlcv_ts_ms == 0) {
+        summary->first_ohlcv_ts_ms = manifestInt("first_ohlcv_timestamp_ms");
+    }
+    summary->first_indicator_ts_ms = getInt64("first_indicator_ts");
+    if (summary->first_indicator_ts_ms == 0) {
+        summary->first_indicator_ts_ms = manifestInt("first_indicator_timestamp_ms");
+    }
+    summary->ohlcv_row_count = manifestInt("ohlcv_rows");
+    if (summary->ohlcv_row_count == 0) {
+        summary->ohlcv_row_count = getInt64("ohlcv_row_count");
+    }
+    summary->indicator_row_count = manifestInt("indicator_rows");
+    if (summary->indicator_row_count == 0) {
+        summary->indicator_row_count = getInt64("indicator_row_count");
+    }
+    summary->ohlcv_measurement = manifestString("ohlcv_measurement");
+    summary->indicator_measurement = manifestString("indicator_measurement");
+    if (summary->ohlcv_measurement.empty()) {
+        summary->ohlcv_measurement = getString("ohlcv_measurement");
+    }
+    if (summary->indicator_measurement.empty()) {
+        summary->indicator_measurement = getString("indicator_measurement");
+    }
+    if (summary->ohlcv_measurement.empty()) {
+        summary->ohlcv_measurement = DefaultMeasurement(summary->dataset_slug, "ohlcv");
+    }
+    if (summary->indicator_measurement.empty()) {
+        summary->indicator_measurement = DefaultMeasurement(summary->dataset_slug, "ind");
+    }
+    summary->ohlcv_first_ts = summary->first_ohlcv_ts_ms > 0
+        ? FormatIsoTimestamp(summary->first_ohlcv_ts_ms)
+        : getString("ohlcv_first_ts");
+    int64_t lastOhlcvMs = manifestInt("last_ohlcv_timestamp_ms");
+    summary->ohlcv_last_ts = getString("ohlcv_last_ts");
+    if (summary->ohlcv_last_ts.empty() && lastOhlcvMs > 0) {
+        summary->ohlcv_last_ts = FormatIsoTimestamp(lastOhlcvMs);
+    }
+    summary->indicator_first_ts = summary->first_indicator_ts_ms > 0
+        ? FormatIsoTimestamp(summary->first_indicator_ts_ms)
+        : getString("indicator_first_ts");
+    int64_t lastIndicatorMs = manifestInt("last_indicator_timestamp_ms");
+    summary->indicator_last_ts = getString("indicator_last_ts");
+    if (summary->indicator_last_ts.empty() && lastIndicatorMs > 0) {
+        summary->indicator_last_ts = FormatIsoTimestamp(lastIndicatorMs);
+    }
+    summary->run_count = getInt64("run_count");
+    summary->simulation_count = getInt64("simulation_count");
+    summary->updated_at = manifestString("exported_at");
+    if (summary->updated_at.empty()) {
+        summary->updated_at = getString("updated_at");
+    }
     return true;
 }
 
@@ -469,6 +618,139 @@ bool RestClient::QuestDbQuery(const std::string& sql,
     return true;
 }
 
+bool RestClient::FetchDataset(const std::string& datasetId,
+                              DatasetSummary* summary,
+                              std::string* error) {
+    if (!summary) {
+        if (error) *error = "Dataset summary pointer is null.";
+        return false;
+    }
+    if (datasetId.empty()) {
+        if (error) *error = "dataset_id is required.";
+        return false;
+    }
+    long status = 0;
+    std::string response;
+    if (!Execute("GET", "/api/datasets/" + datasetId, "", {}, &status, &response, error)) {
+        return false;
+    }
+    if (status == 404) {
+        if (error) *error = "Dataset not found";
+        return false;
+    }
+    if (status < 200 || status >= 300) {
+        if (error) {
+            std::ostringstream msg;
+            msg << "Fetch dataset failed with HTTP " << status;
+            if (!response.empty()) {
+                msg << ": " << response;
+            }
+            *error = msg.str();
+        }
+        return false;
+    }
+    rapidjson::Document doc;
+    doc.Parse(response.c_str());
+    if (doc.HasParseError() || !doc.IsObject()) {
+        if (error) *error = "Failed to parse dataset JSON.";
+        return false;
+    }
+    if (!ParseDatasetSummaryNode(doc, summary)) {
+        if (error) *error = "Dataset payload missing required fields.";
+        return false;
+    }
+    return true;
+}
+
+bool RestClient::AppendDatasetRows(const std::string& datasetId,
+                                   const Json::Value& payload,
+                                   AppendTarget target,
+                                   std::string* error) {
+    if (datasetId.empty()) {
+        if (error) *error = "dataset_id is required for append.";
+        return false;
+    }
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string body = Json::writeString(builder, payload);
+    std::string path = "/api/datasets/" + datasetId;
+    path += (target == AppendTarget::Ohlcv) ? "/ohlcv/append" : "/indicators/append";
+    long status = 0;
+    std::string response;
+    if (!Execute("POST", path, body, {}, &status, &response, error)) {
+        return false;
+    }
+    if (status < 200 || status >= 300) {
+        if (error) {
+            std::ostringstream oss;
+            oss << "Stage1 append failed with HTTP " << status;
+            if (!response.empty()) {
+                oss << ": " << response;
+            }
+            *error = oss.str();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool RestClient::CreateOrUpdateDataset(const std::string& datasetId,
+                                       const std::string& datasetSlug,
+                                       const std::string& granularity,
+                                       int64_t barIntervalMs,
+                                       int64_t lookbackRows,
+                                       int64_t firstOhlcvTs,
+                                       int64_t firstIndicatorTs,
+                                       const std::string& metadataJson,
+                                       std::string* error) {
+    if (datasetId.empty()) {
+        if (error) *error = "dataset_id is required.";
+        return false;
+    }
+    if (datasetSlug.empty()) {
+        if (error) *error = "dataset_slug is required.";
+        return false;
+    }
+
+    Json::Value payload;
+    payload["dataset_id"] = datasetId;
+    payload["dataset_slug"] = datasetSlug;
+    payload["granularity"] = granularity;
+    payload["bar_interval_ms"] = Json::Int64(barIntervalMs);
+    payload["lookback_rows"] = Json::Int64(lookbackRows);
+    payload["first_ohlcv_ts"] = Json::Int64(firstOhlcvTs);
+    payload["first_indicator_ts"] = Json::Int64(firstIndicatorTs);
+
+    // Include metadata if provided
+    if (!metadataJson.empty()) {
+        payload["metadata"] = metadataJson;
+    }
+
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string body = Json::writeString(builder, payload);
+
+    long status = 0;
+    std::string response;
+    if (!Execute("POST", "/api/datasets", body, {}, &status, &response, error)) {
+        return false;
+    }
+
+    if (status < 200 || status >= 300) {
+        if (error) {
+            std::ostringstream oss;
+            oss << "Failed to create/update dataset with HTTP " << status;
+            if (!response.empty()) {
+                oss << ": " << response;
+            }
+            *error = oss.str();
+        }
+        return false;
+    }
+
+    return true;
+}
+
 bool RestClient::ListMeasurements(const std::string& prefix,
                                   std::vector<MeasurementInfo>* measurements,
                                   std::string* error) {
@@ -703,41 +985,10 @@ bool RestClient::ParseDatasets(const std::string& json,
     }
     datasets->clear();
     for (const auto& item : datasetsIt->value.GetArray()) {
-        if (!item.IsObject()) {
-            continue;
-        }
         DatasetSummary summary;
-        auto getString = [&](const char* key) -> std::string {
-            auto it = item.FindMember(key);
-            if (it == item.MemberEnd()) {
-                return {};
-            }
-            return ValueToString(it->value);
-        };
-        auto getInt64 = [&](const char* key) -> int64_t {
-            auto it = item.FindMember(key);
-            if (it == item.MemberEnd()) {
-                return 0;
-            }
-            return ValueToInt64(it->value);
-        };
-        summary.dataset_id = getString("dataset_id");
-        summary.dataset_slug = getString("dataset_slug");
-        summary.symbol = getString("symbol");
-        summary.granularity = getString("granularity");
-        summary.source = getString("source");
-        summary.ohlcv_measurement = getString("ohlcv_measurement");
-        summary.indicator_measurement = getString("indicator_measurement");
-        summary.ohlcv_row_count = getInt64("ohlcv_row_count");
-        summary.indicator_row_count = getInt64("indicator_row_count");
-        summary.ohlcv_first_ts = getString("ohlcv_first_ts");
-        summary.ohlcv_last_ts = getString("ohlcv_last_ts");
-        summary.indicator_first_ts = getString("indicator_first_ts");
-        summary.indicator_last_ts = getString("indicator_last_ts");
-        summary.run_count = getInt64("run_count");
-        summary.simulation_count = getInt64("simulation_count");
-        summary.updated_at = getString("updated_at");
-        datasets->push_back(std::move(summary));
+        if (ParseDatasetSummaryNode(item, &summary)) {
+            datasets->push_back(std::move(summary));
+        }
     }
     return true;
 }
