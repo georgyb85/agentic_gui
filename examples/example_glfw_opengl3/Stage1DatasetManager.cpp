@@ -342,7 +342,7 @@ std::filesystem::path ManifestDirectory(const std::string& slug) {
     return base / slug;
 }
 
-constexpr std::size_t kStage1AppendBatchSize = 1000;
+constexpr std::size_t kStage1AppendBatchSize = 10000;
 
 bool FlushRowBatch(const std::string& datasetId,
                    Json::Value* rows,
@@ -364,6 +364,12 @@ Stage1DatasetManager::Stage1DatasetManager() {
     m_datasetSlug[0] = '\0';
     m_indicatorMeasurementBuffer[0] = '\0';
     m_ohlcvMeasurementBuffer[0] = '\0';
+}
+
+void Stage1DatasetManager::UpdateStatus(const std::string& message, bool success) {
+    std::lock_guard<std::mutex> lock(m_statusMutex);
+    m_statusMessage = message;
+    m_statusSuccess = success;
 }
 
 bool Stage1DatasetManager::HasIndicatorData() const {
@@ -659,6 +665,14 @@ void Stage1DatasetManager::LoadSelectedDataset() {
 }
 
 void Stage1DatasetManager::ExportCurrentDataset() {
+    // Check if export already in progress
+    if (m_exportInProgress.load()) {
+        m_statusMessage = "Export already in progress...";
+        m_statusSuccess = false;
+        return;
+    }
+
+    // Quick validation before launching thread
     if (!m_timeSeriesWindow || !m_candlestickChart) {
         m_statusMessage = "OHLCV or indicator window unavailable.";
         m_statusSuccess = false;
@@ -682,6 +696,28 @@ void Stage1DatasetManager::ExportCurrentDataset() {
         return;
     }
 
+    // Join previous thread if it exists
+    if (m_exportThread.joinable()) {
+        m_exportThread.join();
+    }
+
+    // Launch export in background thread
+    m_exportInProgress.store(true);
+    UpdateStatus("Starting dataset export in background...", true);
+    m_exportThread = std::thread([this]() {
+        this->ExportCurrentDatasetAsync();
+    });
+}
+
+void Stage1DatasetManager::ExportCurrentDatasetAsync() {
+    // This runs in background thread
+    std::string slug = SanitizeSlug(m_datasetSlug[0] ? m_datasetSlug : m_timeSeriesWindow->GetSuggestedDatasetId());
+    if (slug.empty()) {
+        UpdateStatus("Dataset slug cannot be empty.", false);
+        m_exportInProgress.store(false);
+        return;
+    }
+
     std::string indicatorMeasurement = SanitizeSlug(m_indicatorMeasurementBuffer);
     if (indicatorMeasurement.empty()) {
         indicatorMeasurement = slug + "_ind";
@@ -700,27 +736,27 @@ void Stage1DatasetManager::ExportCurrentDataset() {
 
     const auto* indicatorFrame = m_timeSeriesWindow->GetDataFrame();
     if (!indicatorFrame) {
-        m_statusMessage = "Indicator dataframe is not available for export.";
-        m_statusSuccess = false;
+        UpdateStatus("Indicator dataframe is not available for export.", false);
+        m_exportInProgress.store(false);
         return;
     }
     const auto* ohlcvFrame = m_candlestickChart->GetAnalyticsDataFrame();
     if (!ohlcvFrame) {
-        m_statusMessage = "OHLCV dataframe is not available for export.";
-        m_statusSuccess = false;
+        UpdateStatus("OHLCV dataframe is not available for export.", false);
+        m_exportInProgress.store(false);
         return;
     }
 
     auto indicatorTsColumn = DetectTimestampColumn(*indicatorFrame);
     if (indicatorTsColumn.empty()) {
-        m_statusMessage = "Indicator data is missing a timestamp column.";
-        m_statusSuccess = false;
+        UpdateStatus("Indicator data is missing a timestamp column.", false);
+        m_exportInProgress.store(false);
         return;
     }
     auto ohlcvTsColumn = DetectTimestampColumn(*ohlcvFrame);
     if (ohlcvTsColumn.empty()) {
-        m_statusMessage = "OHLCV data is missing a timestamp column.";
-        m_statusSuccess = false;
+        UpdateStatus("OHLCV data is missing a timestamp column.", false);
+        m_exportInProgress.store(false);
         return;
     }
 
@@ -776,10 +812,8 @@ void Stage1DatasetManager::ExportCurrentDataset() {
     record.created_at = exportedAt;
     std::string metadataError;
     if (!Stage1MetadataWriter::Instance().RecordDatasetExport(record, &metadataError)) {
-        m_statusMessage = metadataError.empty()
-            ? "Failed to register dataset metadata with Stage1."
-            : metadataError;
-        m_statusSuccess = false;
+        UpdateStatus(metadataError.empty() ? "Failed to register dataset metadata with Stage1." : metadataError, false);
+        m_exportInProgress.store(false);
         return;
     }
 
@@ -788,10 +822,10 @@ void Stage1DatasetManager::ExportCurrentDataset() {
         std::snprintf(m_datasetSlug, sizeof(m_datasetSlug), "%s", slug.c_str());
         std::snprintf(m_indicatorMeasurementBuffer, sizeof(m_indicatorMeasurementBuffer), "%s", indicatorMeasurement.c_str());
         std::snprintf(m_ohlcvMeasurementBuffer, sizeof(m_ohlcvMeasurementBuffer), "%s", ohlcvMeasurement.c_str());
-        m_statusMessage = "Dataset '" + slug + "' exported locally. Stage1 network exports are disabled (set STAGE1_ENABLE_EXPORTS=1 to sync).";
-        m_statusSuccess = true;
+        UpdateStatus("Dataset '" + slug + "' exported locally. Stage1 network exports are disabled (set STAGE1_ENABLE_EXPORTS=1 to sync).", true);
         m_refreshPending = true;
         m_selectedIndex = -1;
+        m_exportInProgress.store(false);
         return;
     }
 
@@ -820,27 +854,21 @@ void Stage1DatasetManager::ExportCurrentDataset() {
             manifestJson,
             &createError)) {
         std::cout << "[Stage1DatasetManager] Failed to create dataset: " << createError << std::endl;
-        m_statusMessage = createError.empty()
-            ? "Failed to create dataset on Stage1 server."
-            : createError;
-        m_statusSuccess = false;
+        UpdateStatus(createError.empty() ? "Failed to create dataset on Stage1 server." : createError, false);
+        m_exportInProgress.store(false);
         return;
     }
     std::cout << "[Stage1DatasetManager] Dataset created successfully on server" << std::endl;
 
     std::string uploadError;
     if (!UploadOhlcvRowsToStage1(resolvedDatasetId, &uploadError)) {
-        m_statusMessage = uploadError.empty()
-            ? "Failed to upload OHLCV rows to Stage1."
-            : uploadError;
-        m_statusSuccess = false;
+        UpdateStatus(uploadError.empty() ? "Failed to upload OHLCV rows to Stage1." : uploadError, false);
+        m_exportInProgress.store(false);
         return;
     }
     if (!UploadIndicatorRowsToStage1(resolvedDatasetId, indicatorTsColumn, &uploadError)) {
-        m_statusMessage = uploadError.empty()
-            ? "Failed to upload indicator rows to Stage1."
-            : uploadError;
-        m_statusSuccess = false;
+        UpdateStatus(uploadError.empty() ? "Failed to upload indicator rows to Stage1." : uploadError, false);
+        m_exportInProgress.store(false);
         return;
     }
 
@@ -848,10 +876,10 @@ void Stage1DatasetManager::ExportCurrentDataset() {
     std::snprintf(m_datasetSlug, sizeof(m_datasetSlug), "%s", slug.c_str());
     std::snprintf(m_indicatorMeasurementBuffer, sizeof(m_indicatorMeasurementBuffer), "%s", indicatorMeasurement.c_str());
     std::snprintf(m_ohlcvMeasurementBuffer, sizeof(m_ohlcvMeasurementBuffer), "%s", ohlcvMeasurement.c_str());
-    m_statusMessage = "Dataset '" + slug + "' exported.";
-    m_statusSuccess = true;
+    UpdateStatus("Dataset '" + slug + "' exported successfully!", true);
     m_refreshPending = true;
     m_selectedIndex = -1;
+    m_exportInProgress.store(false);
 }
 
 std::vector<Stage1DatasetManager::DatasetRow> Stage1DatasetManager::LoadLocalDatasetRows() const {
