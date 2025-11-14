@@ -255,6 +255,16 @@ std::string RunConfigSerializer::Serialize(const Snapshot& snapshot, uint32_t se
         oss << '\n';
     }
 
+    if (snapshot.hasStressConfig) {
+        const auto& stress = snapshot.stress;
+        oss << "[STRESS_TEST]\n";
+        AppendBool(oss, "enable", stress.enable);
+        AppendNumeric(oss, "bootstrap_iterations", stress.bootstrap_iterations, 0);
+        AppendNumeric(oss, "mcpt_iterations", stress.mcpt_iterations, 0);
+        AppendNumeric(oss, "seed", static_cast<long long>(stress.seed), 0);
+        oss << '\n';
+    }
+
     return oss.str();
 }
 
@@ -273,6 +283,7 @@ bool RunConfigSerializer::Deserialize(const std::string& text, Snapshot* snapsho
         Walkforward,
         Hyperparameters,
         Trade,
+        Stress,
         Target
     };
     ParseSection section = ParseSection::None;
@@ -316,6 +327,7 @@ bool RunConfigSerializer::Deserialize(const std::string& text, Snapshot* snapsho
             if (tagLower == "walkforward") { flushSchedule(); section = ParseSection::Walkforward; continue; }
             if (tagLower == "hyperparameters") { flushSchedule(); section = ParseSection::Hyperparameters; continue; }
             if (tagLower == "trade") { flushSchedule(); section = ParseSection::Trade; continue; }
+            if (tagLower == "stress_test" || tagLower == "stresstest") { flushSchedule(); section = ParseSection::Stress; continue; }
             continue;
         }
 
@@ -340,6 +352,12 @@ bool RunConfigSerializer::Deserialize(const std::string& text, Snapshot* snapsho
             || lowerLine == "trade configuration") {
             flushSchedule();
             section = ParseSection::Trade;
+            continue;
+        }
+        if (lowerLine.find("stress") != std::string::npos &&
+            lowerLine.find("test") != std::string::npos) {
+            flushSchedule();
+            section = ParseSection::Stress;
             continue;
         }
         if (lowerLine == "target" || lowerLine == "target column") {
@@ -483,6 +501,31 @@ bool RunConfigSerializer::Deserialize(const std::string& text, Snapshot* snapsho
                 if (normalizedKey == "thresholdchoice") { cfg.threshold_choice = ParseThresholdChoice(value); continue; }
                 break;
             }
+            case ParseSection::Stress: {
+                result.hasStressConfig = true;
+                if (normalizedKey == "enable") {
+                    bool parsed;
+                    ParseBoolValue(value, true, &parsed);
+                    result.stress.enable = parsed;
+                    continue;
+                }
+                if (normalizedKey == "bootstrapiterations") {
+                    ParseIntegral(value, &result.stress.bootstrap_iterations);
+                    continue;
+                }
+                if (normalizedKey == "mcptiterations") {
+                    ParseIntegral(value, &result.stress.mcpt_iterations);
+                    continue;
+                }
+                if (normalizedKey == "seed") {
+                    std::uint64_t seed = result.stress.seed;
+                    if (ParseIntegral(value, &seed)) {
+                        result.stress.seed = seed;
+                    }
+                    continue;
+                }
+                break;
+            }
             case ParseSection::FeatureSchedule:
                 // handled earlier
                 break;
@@ -503,6 +546,7 @@ bool RunConfigSerializer::Deserialize(const std::string& text, Snapshot* snapsho
         !result.features.empty() ||
         result.hasHyperparameters ||
         result.hasTradeConfig ||
+        result.hasStressConfig ||
         result.hasWalkForward ||
         !result.target.empty();
 
@@ -523,6 +567,7 @@ bool RunConfigSerializer::LooksLikeSerializedConfig(const std::string& text) {
     }
     if (text.find("[FEATURES]") != std::string::npos ||
         text.find("[TRADE]") != std::string::npos ||
+        text.find("[STRESS_TEST]") != std::string::npos ||
         text.find("# Trade Simulation Parameters") != std::string::npos ||
         text.find("Train Size") != std::string::npos ||
         text.find("position_size") != std::string::npos) {

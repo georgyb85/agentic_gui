@@ -18,6 +18,8 @@
 #include "QuestDbDataFrameGateway.h"
 #include "analytics_dataframe.h"
 #include "dataframe_io.h"
+#include "Stage1RestClient.h"
+#include <json/json.h>
 
 namespace {
 
@@ -337,6 +339,127 @@ bool CandlestickChart::LoadFromQuestDb(const std::string& measurement, std::stri
     data_loaded_ = true;
     fit_x_axis_on_next_draw_ = true;
     data_loading_error_.clear();
+    return true;
+}
+
+bool CandlestickChart::LoadFromStage1(const std::string& datasetId, std::string* statusMessage) {
+    if (datasetId.empty()) {
+        if (statusMessage) {
+            *statusMessage = "Dataset ID cannot be empty.";
+        }
+        return false;
+    }
+
+    Json::Value rows;
+    std::string error;
+    if (!stage1::RestClient::Instance().FetchDatasetOhlcv(datasetId, &rows, &error)) {
+        if (statusMessage) {
+            *statusMessage = "Failed to fetch OHLCV: " + error;
+        }
+        return false;
+    }
+
+    if (!rows.isArray() || rows.empty()) {
+        if (statusMessage) {
+            *statusMessage = "No OHLCV data returned from Stage1.";
+        }
+        return false;
+    }
+
+    // Helper to parse ISO8601 timestamp to milliseconds
+    auto parseTimestamp = [](const Json::Value& val) -> int64_t {
+        if (val.isInt64()) {
+            return val.asInt64();
+        } else if (val.isDouble()) {
+            return static_cast<int64_t>(val.asDouble());
+        } else if (val.isString()) {
+            std::string str = val.asString();
+            // Try parsing as ISO8601: "2024-11-28T22:00:00.000000Z"
+            if (str.size() >= 19 && str.find('T') != std::string::npos) {
+                std::tm tm = {};
+                int year, month, day, hour, minute, second;
+                if (sscanf(str.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) == 6) {
+                    tm.tm_year = year - 1900;
+                    tm.tm_mon = month - 1;
+                    tm.tm_mday = day;
+                    tm.tm_hour = hour;
+                    tm.tm_min = minute;
+                    tm.tm_sec = second;
+                    #ifdef _WIN32
+                    time_t t = _mkgmtime(&tm);
+                    #else
+                    time_t t = timegm(&tm);
+                    #endif
+                    return static_cast<int64_t>(t) * 1000; // Convert to milliseconds
+                }
+            }
+            // Try parsing as numeric string
+            try {
+                return std::stoll(str);
+            } catch (...) {
+                return 0;
+            }
+        }
+        return 0;
+    };
+
+    // Convert JSON rows to OHLCV format
+    std::vector<OHLCVData> candles;
+    candles.reserve(rows.size());
+
+    size_t skipped = 0;
+    for (const auto& row : rows) {
+        if (!row.isObject()) {
+            skipped++;
+            continue;
+        }
+
+        OHLCVData candle;
+        int64_t timestamp_ms = 0;
+        if (row.isMember("timestamp_ms")) {
+            timestamp_ms = parseTimestamp(row["timestamp_ms"]);
+        } else if (row.isMember("timestamp")) {
+            timestamp_ms = parseTimestamp(row["timestamp"]);
+        }
+
+        if (timestamp_ms == 0) {
+            skipped++;
+            continue;
+        }
+
+        candle.time = static_cast<time_t>(timestamp_ms / 1000); // Convert milliseconds to seconds
+
+        // Parse OHLCV values - they might be strings or numbers
+        auto getDoubleValue = [](const Json::Value& val) -> double {
+            if (val.isDouble()) return val.asDouble();
+            if (val.isInt()) return static_cast<double>(val.asInt64());
+            if (val.isString()) return std::stod(val.asString());
+            return 0.0;
+        };
+
+        candle.open = getDoubleValue(row.get("open", 0.0));
+        candle.high = getDoubleValue(row.get("high", 0.0));
+        candle.low = getDoubleValue(row.get("low", 0.0));
+        candle.close = getDoubleValue(row.get("close", 0.0));
+        candle.volume = getDoubleValue(row.get("volume", 0.0));
+
+        candles.push_back(candle);
+    }
+
+    if (candles.empty()) {
+        if (statusMessage) {
+            *statusMessage = "No valid candles found in response.";
+        }
+        return false;
+    }
+
+    ohlcv_data_.setData(candles);
+    use_file_data_ = false;
+    data_loaded_ = true;
+    fit_x_axis_on_next_draw_ = true;
+    data_loading_error_.clear();
+    last_questdb_measurement_.clear();
+
     return true;
 }
 

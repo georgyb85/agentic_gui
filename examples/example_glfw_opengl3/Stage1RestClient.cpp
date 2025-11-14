@@ -456,6 +456,138 @@ bool RestClient::FetchRunDetail(const std::string& runId,
     return true;
 }
 
+bool RestClient::FetchDatasetOhlcv(const std::string& datasetId,
+                                   Json::Value* rows,
+                                   std::string* error,
+                                   int limit) {
+    if (!rows) {
+        if (error) *error = "Rows container is null.";
+        return false;
+    }
+    if (datasetId.empty()) {
+        if (error) *error = "Dataset ID is required.";
+        return false;
+    }
+
+    std::ostringstream path;
+    path << "/api/datasets/" << datasetId << "/ohlcv";
+    if (limit > 0) {
+        path << "?limit=" << limit;
+    }
+
+    long status = 0;
+    std::string response;
+    if (!Execute("GET", path.str(), "", {}, &status, &response, error)) {
+        return false;
+    }
+
+    if (status < 200 || status >= 300) {
+        if (error) {
+            std::ostringstream msg;
+            msg << "Stage1 API returned HTTP " << status << " while fetching OHLCV.";
+            if (!response.empty()) {
+                msg << " Body: " << response;
+            }
+            *error = msg.str();
+        }
+        return false;
+    }
+
+    // Parse JSON response
+    Json::CharReaderBuilder builder;
+    Json::CharReader* reader = builder.newCharReader();
+    Json::Value root;
+    std::string parseError;
+
+    bool parsed = reader->parse(
+        response.c_str(),
+        response.c_str() + response.size(),
+        &root,
+        &parseError
+    );
+    delete reader;
+
+    if (!parsed) {
+        if (error) *error = "Failed to parse JSON response: " + parseError;
+        return false;
+    }
+
+    if (!root.isMember("rows") || !root["rows"].isArray()) {
+        if (error) *error = "Response missing 'rows' array.";
+        return false;
+    }
+
+    *rows = root["rows"];
+    std::cout << "[Stage1RestClient] Fetched " << rows->size() << " OHLCV rows" << std::endl;
+    return true;
+}
+
+bool RestClient::FetchDatasetIndicators(const std::string& datasetId,
+                                        Json::Value* rows,
+                                        std::string* error,
+                                        int limit) {
+    if (!rows) {
+        if (error) *error = "Rows container is null.";
+        return false;
+    }
+    if (datasetId.empty()) {
+        if (error) *error = "Dataset ID is required.";
+        return false;
+    }
+
+    std::ostringstream path;
+    path << "/api/datasets/" << datasetId << "/indicators";
+    if (limit > 0) {
+        path << "?limit=" << limit;
+    }
+
+    long status = 0;
+    std::string response;
+    if (!Execute("GET", path.str(), "", {}, &status, &response, error)) {
+        return false;
+    }
+
+    if (status < 200 || status >= 300) {
+        if (error) {
+            std::ostringstream msg;
+            msg << "Stage1 API returned HTTP " << status << " while fetching indicators.";
+            if (!response.empty()) {
+                msg << " Body: " << response;
+            }
+            *error = msg.str();
+        }
+        return false;
+    }
+
+    // Parse JSON response
+    Json::CharReaderBuilder builder;
+    Json::CharReader* reader = builder.newCharReader();
+    Json::Value root;
+    std::string parseError;
+
+    bool parsed = reader->parse(
+        response.c_str(),
+        response.c_str() + response.size(),
+        &root,
+        &parseError
+    );
+    delete reader;
+
+    if (!parsed) {
+        if (error) *error = "Failed to parse JSON response: " + parseError;
+        return false;
+    }
+
+    if (!root.isMember("rows") || !root["rows"].isArray()) {
+        if (error) *error = "Response missing 'rows' array.";
+        return false;
+    }
+
+    *rows = root["rows"];
+    std::cout << "[Stage1RestClient] Fetched " << rows->size() << " indicator rows" << std::endl;
+    return true;
+}
+
 bool RestClient::SubmitQuestDbImport(const std::string& measurement,
                                      const std::string& csvData,
                                      const std::string& filenameHint,

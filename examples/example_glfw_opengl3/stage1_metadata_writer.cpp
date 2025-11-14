@@ -1,4 +1,5 @@
 #include "stage1_metadata_writer.h"
+#include "Stage1DatasetManifest.h"
 #include "Stage1RestClient.h"
 #include "TradeSimulator.h"
 #include <filesystem>
@@ -12,10 +13,15 @@
 #include <functional>
 #include <cmath>
 #include <ctime>
+#include <thread>
+#include <cctype>
+#include <algorithm>
 
+#include <json/json.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <libpq-fe.h>
 
 namespace {
 std::mutex g_writerMutex;
@@ -62,12 +68,170 @@ void WriteJsonObjectOrEmpty(rapidjson::Writer<rapidjson::StringBuffer>& writer,
     doc.Accept(writer);
 }
 
+Json::Value ParseJsonObject(const std::string& text) {
+    if (text.empty()) {
+        return Json::Value(Json::objectValue);
+    }
+    Json::CharReaderBuilder builder;
+    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+    Json::Value value(Json::objectValue);
+    std::string errs;
+    if (reader->parse(text.data(), text.data() + text.size(), &value, &errs) && value.isObject()) {
+        return value;
+    }
+    return Json::Value(Json::objectValue);
+}
+
+std::string SerializeJson(const Json::Value& value) {
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    return Json::writeString(builder, value);
+}
+
+std::string SerializeFeatureColumns(const std::vector<std::string>& columns) {
+    Json::Value array(Json::arrayValue);
+    for (const auto& column : columns) {
+        array.append(column);
+    }
+    return SerializeJson(array);
+}
+
+std::string GetEnvOrDefault(const char* key, const char* fallback) {
+    const char* value = std::getenv(key);
+    if (value && *value) {
+        return value;
+    }
+    return fallback ? std::string(fallback) : std::string();
+}
+
+std::string TrimErrorMessage(const char* message) {
+    if (!message) {
+        return {};
+    }
+    std::string trimmed(message);
+    while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r')) {
+        trimmed.pop_back();
+    }
+    return trimmed;
+}
+
+std::string QuoteConnValue(const std::string& value) {
+    std::string quoted;
+    quoted.reserve(value.size() + 3);
+    quoted.push_back('\'');
+    for (char ch : value) {
+        if (ch == '\'') {
+            quoted.push_back('\\');
+        }
+        quoted.push_back(ch);
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
+
+int64_t IntervalFromGranularity(const std::string& granularity) {
+    if (granularity == "1m") return 60 * 1000LL;
+    if (granularity == "5m") return 5 * 60 * 1000LL;
+    if (granularity == "15m") return 15 * 60 * 1000LL;
+    if (granularity == "30m") return 30 * 60 * 1000LL;
+    if (granularity == "1h") return 60 * 60 * 1000LL;
+    if (granularity == "4h") return 4 * 60 * 60 * 1000LL;
+    if (granularity == "1d") return 24 * 60 * 60 * 1000LL;
+    return 0;
+}
+
+stage1::DatasetManifest BuildManifestFromRecord(const Stage1MetadataWriter::DatasetRecord& record) {
+    stage1::DatasetManifest manifest;
+    manifest.dataset_id = record.dataset_id;
+    manifest.dataset_slug = record.dataset_slug;
+    manifest.symbol = record.symbol;
+    manifest.granularity = record.granularity;
+    manifest.source = record.source;
+    manifest.ohlcv_measurement = record.ohlcv_measurement;
+    manifest.indicator_measurement = record.indicator_measurement;
+    manifest.ohlcv_rows = record.ohlcv_row_count;
+    manifest.indicator_rows = record.indicator_row_count;
+    manifest.first_ohlcv_timestamp_ms = record.ohlcv_first_timestamp_unix.value_or(0);
+    manifest.last_ohlcv_timestamp_ms = record.ohlcv_last_timestamp_unix.value_or(0);
+    manifest.first_indicator_timestamp_ms = record.indicator_first_timestamp_unix.value_or(0);
+    manifest.last_indicator_timestamp_ms = record.indicator_last_timestamp_unix.value_or(0);
+    manifest.bar_interval_ms = IntervalFromGranularity(record.granularity);
+    if (manifest.bar_interval_ms == 0 && manifest.ohlcv_rows > 1 && manifest.last_ohlcv_timestamp_ms > manifest.first_ohlcv_timestamp_ms) {
+        const auto span = manifest.last_ohlcv_timestamp_ms - manifest.first_ohlcv_timestamp_ms;
+        manifest.bar_interval_ms = span / std::max<int64_t>(1, manifest.ohlcv_rows - 1);
+    }
+    if (manifest.ohlcv_rows > manifest.indicator_rows) {
+        manifest.lookback_rows = manifest.ohlcv_rows - manifest.indicator_rows;
+    }
+    manifest.exported_at_iso = stage1::FormatIsoTimestamp(record.created_at);
+    return manifest;
+}
+
+bool ExecuteDatasetSql(const std::string& sql, std::string* error) {
+    if (sql.empty()) {
+        return true;
+    }
+
+    const std::string host = GetEnvOrDefault("STAGE1_POSTGRES_HOST", "45.85.147.236");
+    const std::string port = GetEnvOrDefault("STAGE1_POSTGRES_PORT", "5432");
+    const std::string db = GetEnvOrDefault("STAGE1_POSTGRES_DB", "stage1_trading");
+    const std::string user = GetEnvOrDefault("STAGE1_POSTGRES_USER", "stage1_app");
+    const std::string password = GetEnvOrDefault("STAGE1_POSTGRES_PASSWORD", "TempPass2025");
+
+    std::ostringstream conninfo;
+    conninfo << "host=" << QuoteConnValue(host)
+             << " port=" << QuoteConnValue(port)
+             << " dbname=" << QuoteConnValue(db)
+             << " user=" << QuoteConnValue(user)
+             << " password=" << QuoteConnValue(password);
+
+    PGconn* conn = PQconnectdb(conninfo.str().c_str());
+    if (!conn || PQstatus(conn) != CONNECTION_OK) {
+        if (error) {
+            *error = TrimErrorMessage(conn ? PQerrorMessage(conn) : "PG connection failure");
+        }
+        if (conn) {
+            PQfinish(conn);
+        }
+        return false;
+    }
+
+    PGresult* res = PQexec(conn, sql.c_str());
+    bool success = true;
+    std::string lastError;
+
+    while (res) {
+        ExecStatusType status = PQresultStatus(res);
+        if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+            success = false;
+            const char* msg = PQresultErrorMessage(res);
+            if (msg && *msg) {
+                lastError = TrimErrorMessage(msg);
+            }
+        }
+        PQclear(res);
+        res = PQgetResult(conn);
+    }
+
+    if (!success && error) {
+        if (!lastError.empty()) {
+            *error = lastError;
+        } else {
+            *error = TrimErrorMessage(PQerrorMessage(conn));
+        }
+    }
+
+    PQfinish(conn);
+    return success;
+}
+
 std::string BuildDatasetJson(const Stage1MetadataWriter::DatasetRecord& record) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    const std::string indicatorMeasurement = record.indicator_measurement.empty()
-        ? record.dataset_slug
-        : record.indicator_measurement;
+    auto manifest = BuildManifestFromRecord(record);
+    std::string manifestPayload = record.metadata_json.empty()
+        ? manifest.ToJsonString()
+        : record.metadata_json;
 
     writer.StartObject();
     writer.Key("dataset_id");
@@ -78,24 +242,20 @@ std::string BuildDatasetJson(const Stage1MetadataWriter::DatasetRecord& record) 
     writer.String(record.symbol.c_str());
     writer.Key("granularity");
     writer.String(record.granularity.c_str());
-    writer.Key("source");
-    writer.String(record.source.c_str());
-    writer.Key("indicator_measurement");
-    writer.String(indicatorMeasurement.c_str());
-    if (!record.ohlcv_measurement.empty()) {
-        writer.Key("ohlcv_measurement");
-        writer.String(record.ohlcv_measurement.c_str());
+    writer.Key("bar_interval_ms");
+    writer.Int64(manifest.bar_interval_ms);
+    writer.Key("lookback_rows");
+    writer.Int64(manifest.lookback_rows);
+    if (record.ohlcv_first_timestamp_unix) {
+        writer.Key("first_ohlcv_ts");
+        writer.Int64(*record.ohlcv_first_timestamp_unix);
     }
-    if (record.ohlcv_row_count > 0) {
-        writer.Key("ohlcv_row_count");
-        writer.Int64(record.ohlcv_row_count);
-    }
-    if (record.indicator_row_count > 0) {
-        writer.Key("indicator_row_count");
-        writer.Int64(record.indicator_row_count);
+    if (record.indicator_first_timestamp_unix) {
+        writer.Key("first_indicator_ts");
+        writer.Int64(*record.indicator_first_timestamp_unix);
     }
     writer.Key("metadata");
-    WriteJsonObjectOrEmpty(writer, record.metadata_json);
+    WriteJsonObjectOrEmpty(writer, manifestPayload);
     writer.EndObject();
     return std::string(buffer.GetString(), buffer.GetSize());
 }
@@ -209,7 +369,8 @@ void WriteFoldJson(rapidjson::Writer<rapidjson::StringBuffer>& writer,
 }
 
 std::string BuildRunJson(const Stage1MetadataWriter::WalkforwardRecord& record,
-                         const std::string& requester) {
+                         const std::string& requester,
+                         const std::string& walkConfigOverride) {
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     writer.StartObject();
@@ -233,7 +394,11 @@ std::string BuildRunJson(const Stage1MetadataWriter::WalkforwardRecord& record,
     writer.Key("hyperparameters");
     WriteJsonObjectOrEmpty(writer, record.hyperparameters_json);
     writer.Key("walk_config");
-    WriteJsonObjectOrEmpty(writer, record.walk_config_json);
+    if (walkConfigOverride.empty()) {
+        WriteJsonObjectOrEmpty(writer, record.walk_config_json);
+    } else {
+        WriteJsonObjectOrEmpty(writer, walkConfigOverride);
+    }
     writer.Key("summary_metrics");
     WriteJsonObjectOrEmpty(writer, record.summary_metrics_json);
     writer.Key("status");
@@ -456,98 +621,239 @@ Stage1MetadataWriter::Stage1MetadataWriter()
     }
 }
 
-void Stage1MetadataWriter::RecordDatasetExport(const DatasetRecord& record, PersistMode mode) {
-    auto TsLiteral = [](const std::optional<std::int64_t>& value) {
-        return value ? ToTimestampLiteral(*value) : std::string("NULL");
+bool Stage1MetadataWriter::NetworkExportsEnabled() {
+    const char* flag = std::getenv("STAGE1_ENABLE_EXPORTS");
+    if (!flag || !*flag) {
+        return true;
+    }
+    std::string value(flag);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "0" || value == "false" || value == "off" || value == "no") {
+        return false;
+    }
+    return true;
+}
+
+bool Stage1MetadataWriter::DirectDatabaseExportsEnabled() {
+    const char* flag = std::getenv("STAGE1_DIRECT_DB_EXPORTS");
+    if (!flag || !*flag) {
+        return false;
+    }
+    std::string value(flag);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return !(value == "0" || value == "false" || value == "off" || value == "no");
+}
+
+bool Stage1MetadataWriter::RecordDatasetExport(const DatasetRecord& record,
+                                               std::string* error,
+                                               PersistMode mode) {
+    auto MsLiteral = [](const std::optional<std::int64_t>& value) {
+        return value ? std::to_string(*value) : std::string("NULL");
     };
-    std::string metadataJson = record.metadata_json.empty()
+    const bool allowNetwork = (mode != PersistMode::FileOnly) && NetworkExportsEnabled();
+    std::string manifestPayload = record.metadata_json;
+    auto manifest = BuildManifestFromRecord(record);
+    if (manifestPayload.empty()) {
+        manifestPayload = manifest.ToJsonString();
+    }
+    std::string metadataJson = manifestPayload.empty()
         ? "'{}'::jsonb"
-        : Quote(record.metadata_json) + "::jsonb";
+        : Quote(manifestPayload) + "::jsonb";
+
+    const std::string datasetSlug = record.dataset_slug.empty() ? record.dataset_id : record.dataset_slug;
+    const std::string symbol = record.symbol.empty() ? "UNKNOWN" : record.symbol;
+    const std::string granularity = record.granularity.empty() ? "unknown" : record.granularity;
+
+    if (manifest.bar_interval_ms <= 0 && record.ohlcv_first_timestamp_unix && record.ohlcv_last_timestamp_unix) {
+        const auto span = *record.ohlcv_last_timestamp_unix - *record.ohlcv_first_timestamp_unix;
+        if (span > 0 && record.ohlcv_row_count > 1) {
+            manifest.bar_interval_ms = span / std::max<int64_t>(1, record.ohlcv_row_count - 1);
+        }
+    }
+    if (manifest.lookback_rows <= 0 &&
+        record.ohlcv_row_count > 0 && record.indicator_row_count > 0) {
+        manifest.lookback_rows = std::max<int64_t>(0, record.ohlcv_row_count - record.indicator_row_count);
+    }
 
     std::ostringstream sql;
-    sql << "SELECT upsert_stage1_dataset("
-        << Quote(record.dataset_id) << ", "
-        << Quote(record.dataset_slug.empty() ? record.dataset_id : record.dataset_slug) << ", "
-        << Quote(record.symbol.empty() ? "UNKNOWN" : record.symbol) << ", "
-        << Quote(record.granularity.empty() ? "unknown" : record.granularity) << ", "
-        << Quote(record.source.empty() ? "laptop_imgui" : record.source) << ", "
-        << Quote(record.ohlcv_measurement) << ", "
-        << Quote(record.indicator_measurement) << ", "
-        << record.ohlcv_row_count << ", "
-        << record.indicator_row_count << ", "
-        << TsLiteral(record.ohlcv_first_timestamp_unix) << ", "
-        << TsLiteral(record.ohlcv_last_timestamp_unix) << ", "
-        << TsLiteral(record.indicator_first_timestamp_unix) << ", "
-        << TsLiteral(record.indicator_last_timestamp_unix) << ", "
-        << metadataJson
-        << ");\n";
-
-    sql << "INSERT INTO indicator_datasets (dataset_id, symbol, granularity, source, "
-           "questdb_tag, row_count, first_bar_ts, last_bar_ts, created_at)\n"
+    sql << "INSERT INTO datasets (dataset_id, dataset_slug, symbol, granularity, "
+        << "bar_interval_ms, lookback_rows, first_ohlcv_ts, first_indicator_ts, metadata, created_at)\n"
         << "VALUES ("
         << Quote(record.dataset_id) << ", "
-        << Quote(record.symbol.empty() ? "UNKNOWN" : record.symbol) << ", "
-        << Quote(record.granularity.empty() ? "unknown" : record.granularity) << ", "
-        << Quote(record.source.empty() ? "laptop_imgui" : record.source) << ", "
-        << Quote(record.indicator_measurement.empty() ? record.dataset_slug : record.indicator_measurement) << ", "
-        << record.indicator_row_count << ", "
-        << TsLiteral(record.indicator_first_timestamp_unix) << ", "
-        << TsLiteral(record.indicator_last_timestamp_unix) << ", "
+        << Quote(datasetSlug) << ", "
+        << Quote(symbol) << ", "
+        << Quote(granularity) << ", "
+        << manifest.bar_interval_ms << ", "
+        << manifest.lookback_rows << ", "
+        << MsLiteral(record.ohlcv_first_timestamp_unix) << ", "
+        << MsLiteral(record.indicator_first_timestamp_unix) << ", "
+        << metadataJson << ", "
         << ToTimestampLiteral(record.created_at) << ")\n"
         << "ON CONFLICT (dataset_id) DO UPDATE SET\n"
+        << "  dataset_slug = EXCLUDED.dataset_slug,\n"
         << "  symbol = EXCLUDED.symbol,\n"
         << "  granularity = EXCLUDED.granularity,\n"
-        << "  source = EXCLUDED.source,\n"
-        << "  questdb_tag = EXCLUDED.questdb_tag,\n"
-        << "  row_count = EXCLUDED.row_count,\n"
-        << "  first_bar_ts = EXCLUDED.first_bar_ts,\n"
-        << "  last_bar_ts = EXCLUDED.last_bar_ts;\n\n";
+        << "  bar_interval_ms = EXCLUDED.bar_interval_ms,\n"
+        << "  lookback_rows = EXCLUDED.lookback_rows,\n"
+        << "  first_ohlcv_ts = EXCLUDED.first_ohlcv_ts,\n"
+        << "  first_indicator_ts = EXCLUDED.first_indicator_ts,\n"
+        << "  metadata = EXCLUDED.metadata;\n\n";
+
+    bool pgOk = true;
+    std::string pgError;
+    const bool allowDirectDb = allowNetwork && DirectDatabaseExportsEnabled();
+    if (allowDirectDb) {
+        pgOk = ExecuteDatasetSql(sql.str(), &pgError);
+        if (!pgOk) {
+            std::cerr << "[Stage1MetadataWriter] Postgres dataset upsert failed: "
+                      << pgError << std::endl;
+        }
+    }
 
     const std::string datasetJson = BuildDatasetJson(record);
-    PostStage1Json("dataset", "/api/datasets", datasetJson);
-    AppendSql(sql.str(), mode);
+    std::string apiError;
+    bool apiOk = true;
+    if (allowNetwork) {
+        apiOk = PostStage1Json("dataset", "/api/datasets", datasetJson, &apiError);
+    }
+    AppendSql(sql.str(), allowNetwork ? mode : PersistMode::FileOnly);
+
+    if (!apiOk) {
+        std::cerr << "[Stage1MetadataWriter] Stage1 dataset POST failed: "
+                  << apiError << std::endl;
+    }
+
+    if (error) {
+        if (!pgOk) {
+            *error = pgError;
+        } else if (!apiOk) {
+            *error = apiError;
+        } else {
+            error->clear();
+        }
+    }
+    return pgOk && apiOk;
 }
+
+namespace {
+
+bool VerifyUploadedFoldCount(const Stage1MetadataWriter::WalkforwardRecord& record,
+                             std::string* error) {
+    stage1::RestClient& api = stage1::RestClient::Instance();
+    stage1::RunDetail detail;
+    std::string restError;
+    if (!api.FetchRunDetail(record.run_id, &detail, &restError)) {
+        if (error) {
+            *error = restError.empty()
+                ? "Failed to fetch run detail for verification."
+                : restError;
+        }
+        return false;
+    }
+    const size_t expected = record.folds.size();
+    const size_t actual = detail.folds.size();
+    if (actual == expected) {
+        return true;
+    }
+    if (error) {
+        std::ostringstream oss;
+        oss << "Stage1 stored " << actual << " of " << expected
+            << " folds for run " << record.run_id << ".";
+        *error = oss.str();
+    }
+    return false;
+}
+
+} // namespace
 
 bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
                                                 std::string* error,
                                                 PersistMode mode) {
     std::string requester = record.requested_by.empty() ? CurrentUsername() : record.requested_by;
-    const std::string runJson = BuildRunJson(record, requester);
+    Json::Value walkConfigJsonValue = ParseJsonObject(record.walk_config_json);
+    walkConfigJsonValue["prediction_measurement"] = record.prediction_measurement;
+    std::string walkConfigJson = SerializeJson(walkConfigJsonValue);
+
+    Json::Value hyperparametersValue = ParseJsonObject(record.hyperparameters_json);
+    std::string hyperparametersJson = SerializeJson(hyperparametersValue);
+
+    Json::Value summaryValue = ParseJsonObject(record.summary_metrics_json);
+    std::string summaryJson = SerializeJson(summaryValue);
+
+    std::string featureColumnsJson = SerializeFeatureColumns(record.feature_columns);
+
+    const std::string runJson = BuildRunJson(record, requester, walkConfigJson);
+
+    const bool allowNetwork = (mode != PersistMode::FileOnly) && NetworkExportsEnabled();
 
     std::ostringstream sql;
-    sql << "INSERT INTO walkforward_runs (run_id, dataset_id, prediction_measurement, "
-           "target_column, feature_columns, hyperparameters, walk_config, status, requested_by, "
-           "started_at, completed_at, duration_ms, summary_metrics, created_at)\n"
+    sql << "INSERT INTO walkforward_runs (run_id, dataset_id, status, "
+           "feature_columns, target_column, hyperparameters, walk_config, summary_metrics, "
+           "started_at, completed_at, created_at)\n"
         << "VALUES ("
         << Quote(record.run_id) << ", "
         << Quote(record.dataset_id) << ", "
-        << Quote(record.prediction_measurement) << ", "
-        << Quote(record.target_column) << ", "
-        << Quote(ToJsonArray(record.feature_columns)) << "::jsonb, "
-        << Quote(record.hyperparameters_json) << "::jsonb, "
-        << Quote(record.walk_config_json) << "::jsonb, "
         << Quote(record.status) << ", "
-        << Quote(requester) << ", "
+        << Quote(featureColumnsJson) << "::jsonb, "
+        << Quote(record.target_column) << ", "
+        << Quote(hyperparametersJson) << "::jsonb, "
+        << Quote(walkConfigJson) << "::jsonb, "
+        << Quote(summaryJson) << "::jsonb, "
         << ToTimestampLiteral(record.started_at) << ", "
         << ToTimestampLiteral(record.completed_at) << ", "
-        << record.duration_ms << ", "
-        << Quote(record.summary_metrics_json) << "::jsonb, "
         << ToTimestampLiteral(record.started_at) << ")\n"
         << "ON CONFLICT (run_id) DO UPDATE SET\n"
-        << "  prediction_measurement = EXCLUDED.prediction_measurement,\n"
+        << "  status = EXCLUDED.status,\n"
         << "  feature_columns = EXCLUDED.feature_columns,\n"
         << "  hyperparameters = EXCLUDED.hyperparameters,\n"
         << "  walk_config = EXCLUDED.walk_config,\n"
-        << "  status = EXCLUDED.status,\n"
-        << "  requested_by = EXCLUDED.requested_by,\n"
         << "  started_at = EXCLUDED.started_at,\n"
         << "  completed_at = EXCLUDED.completed_at,\n"
-        << "  duration_ms = EXCLUDED.duration_ms,\n"
         << "  summary_metrics = EXCLUDED.summary_metrics;\n\n";
 
-    std::string stage1Error;
-    bool apiSuccess = PostStage1Json("walkforward run", "/api/runs", runJson, &stage1Error);
-    AppendSql(sql.str(), mode);
+    AppendSql(sql.str(), allowNetwork ? mode : PersistMode::FileOnly);
+
+    if (allowNetwork) {
+        constexpr int kMaxAttempts = 5;
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            std::string stage1Error;
+            if (!PostStage1Json("walkforward run", "/api/runs", runJson, &stage1Error)) {
+                if (error) {
+                    *error = stage1Error.empty()
+                        ? "Stage1 API request failed"
+                        : stage1Error;
+                }
+                return false;
+            }
+
+            std::string verifyError;
+            if (VerifyUploadedFoldCount(record, &verifyError)) {
+                if (attempt > 1) {
+                    std::cout << "[Stage1MetadataWriter] Run " << record.run_id
+                              << " verified after " << attempt << " attempts." << std::endl;
+                }
+                break;
+            }
+
+            if (attempt == kMaxAttempts) {
+                if (error) {
+                    *error = verifyError.empty()
+                        ? "Stage1 stored incomplete fold data after multiple attempts."
+                        : verifyError;
+                }
+                return false;
+            }
+
+            std::cerr << "[Stage1MetadataWriter] Warning: " << verifyError
+                      << " Retrying upload (" << attempt << "/" << kMaxAttempts << ")..."
+                      << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200 * attempt));
+        }
+    }
 
     for (const auto& fold : record.folds) {
         std::ostringstream foldSql;
@@ -565,6 +871,8 @@ bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
                    << "}";
         std::ostringstream metrics;
         metrics << "{"
+                << "\"best_iteration\":" << (fold.best_iteration.has_value() ? *fold.best_iteration : 0) << ","
+                << "\"best_score\":" << FormatDouble(fold.best_score.has_value() ? *fold.best_score : 0.0) << ","
                 << "\"hit_rate\":" << FormatDouble(fold.hit_rate) << ","
                 << "\"short_hit_rate\":" << FormatDouble(fold.short_hit_rate) << ","
                 << "\"profit_factor_test\":" << FormatDouble(fold.profit_factor_test) << ","
@@ -595,8 +903,8 @@ bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
 
         foldSql << "INSERT INTO walkforward_folds "
                    "(run_id, fold_number, train_start_idx, train_end_idx, test_start_idx, "
-                   "test_end_idx, samples_train, samples_test, best_iteration, best_score, "
-                   "thresholds, metrics)\n"
+                   "test_end_idx, train_start_ts_ms, train_end_ts_ms, test_start_ts_ms, test_end_ts_ms, "
+                   "samples_train, samples_test, metrics, thresholds)\n"
                 << "VALUES ("
                 << Quote(record.run_id) << ", "
                 << fold.fold_number << ", "
@@ -604,12 +912,11 @@ bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
                 << fold.train_end << ", "
                 << fold.test_start << ", "
                 << fold.test_end << ", "
+                << "NULL, NULL, NULL, NULL, "
                 << fold.samples_train << ", "
                 << fold.samples_test << ", "
-                << (fold.best_iteration.has_value() ? std::to_string(*fold.best_iteration) : std::string("NULL")) << ", "
-                << (fold.best_score.has_value() ? FormatDouble(*fold.best_score) : std::string("NULL")) << ", "
-                << Quote(thresholds.str()) << "::jsonb, "
-                << Quote(metrics.str()) << "::jsonb)\n"
+                << Quote(metrics.str()) << "::jsonb, "
+                << Quote(thresholds.str()) << "::jsonb)\n"
                 << "ON CONFLICT (run_id, fold_number) DO UPDATE SET\n"
                 << "  train_start_idx = EXCLUDED.train_start_idx,\n"
                 << "  train_end_idx = EXCLUDED.train_end_idx,\n"
@@ -617,19 +924,11 @@ bool Stage1MetadataWriter::RecordWalkforwardRun(const WalkforwardRecord& record,
                 << "  test_end_idx = EXCLUDED.test_end_idx,\n"
                 << "  samples_train = EXCLUDED.samples_train,\n"
                 << "  samples_test = EXCLUDED.samples_test,\n"
-                << "  best_iteration = EXCLUDED.best_iteration,\n"
-                << "  best_score = EXCLUDED.best_score,\n"
-                << "  thresholds = EXCLUDED.thresholds,\n"
-                << "  metrics = EXCLUDED.metrics;\n\n";
+                << "  metrics = EXCLUDED.metrics,\n"
+                << "  thresholds = EXCLUDED.thresholds;\n\n";
         AppendSql(foldSql.str(), mode);
     }
 
-    if (!apiSuccess) {
-        if (error) {
-            *error = stage1Error;
-        }
-        return false;
-    }
     return true;
 }
 
@@ -637,6 +936,7 @@ void Stage1MetadataWriter::RecordSimulationRun(
     const SimulationRecord& record,
     const std::vector<ExecutedTrade>& trades,
     PersistMode mode) {
+    const bool allowNetwork = (mode != PersistMode::FileOnly) && NetworkExportsEnabled();
     const std::string simulationJson = BuildSimulationJson(record, trades);
 
     std::ostringstream sql;
@@ -664,8 +964,10 @@ void Stage1MetadataWriter::RecordSimulationRun(
         << "  started_at = EXCLUDED.started_at,\n"
         << "  completed_at = EXCLUDED.completed_at,\n"
         << "  summary_metrics = EXCLUDED.summary_metrics;\n\n";
-    PostStage1Json("simulation run", "/api/simulations", simulationJson);
-    AppendSql(sql.str(), mode);
+    if (allowNetwork) {
+        PostStage1Json("simulation run", "/api/simulations", simulationJson);
+    }
+    AppendSql(sql.str(), allowNetwork ? mode : PersistMode::FileOnly);
 
     for (const auto& bucket : record.buckets) {
         std::ostringstream bucketSql;

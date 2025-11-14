@@ -30,7 +30,8 @@ public:
     bool HasFileData() const { return use_file_data_ && data_loaded_; }
     bool HasAnyData() const { return data_loaded_; }
     const OhlcvData& GetOhlcvData() const { return ohlcv_data_; }
-    bool LoadFromQuestDb(const std::string& measurement, std::string* statusMessage = nullptr);
+    bool LoadFromQuestDb(const std::string& measurement, std::string* statusMessage = nullptr); // DEPRECATED: Direct QuestDB access
+    bool LoadFromStage1(const std::string& datasetId, std::string* statusMessage = nullptr);
     const chronosflow::AnalyticsDataFrame* GetAnalyticsDataFrame() const { return ohlcv_dataframe_.get(); }
     std::pair<std::optional<int64_t>, std::optional<int64_t>> GetTimestampBoundsMs() const;
     // News events time series

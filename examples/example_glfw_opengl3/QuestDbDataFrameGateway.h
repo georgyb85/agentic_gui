@@ -33,6 +33,8 @@ struct ExportSpec {
     bool coerce_seconds_to_millis = true;
     std::map<std::string, std::string> static_tags;
     std::vector<std::string> tag_columns;
+    bool emit_timestamp_field = false;
+    std::string timestamp_field_name = "timestamp_ms";
 };
 
 struct ImportSpec {

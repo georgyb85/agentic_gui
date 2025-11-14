@@ -280,7 +280,20 @@ bool TradeSimulationWindow::PasteTradeConfigFromClipboard(std::string* statusMes
     }
 
     m_config = snapshot.trade;
-    if (statusMessage) *statusMessage = "Trade parameters pasted from clipboard.";
+    if (snapshot.hasStressConfig) {
+        m_enable_stress_tests = snapshot.stress.enable;
+        m_bootstrap_iterations = snapshot.stress.bootstrap_iterations;
+        m_mcpt_iterations = snapshot.stress.mcpt_iterations;
+        m_stress_seed = snapshot.stress.seed;
+    }
+
+    if (statusMessage) {
+        if (snapshot.hasStressConfig) {
+            *statusMessage = "Trade + stress parameters pasted.";
+        } else {
+            *statusMessage = "Trade parameters pasted (no stress settings in clipboard).";
+        }
+    }
     return true;
 }
 
@@ -310,6 +323,11 @@ void TradeSimulationWindow::DrawConfiguration() {
             }
             snapshot.hasTradeConfig = true;
             snapshot.trade = m_config;
+            snapshot.hasStressConfig = true;
+            snapshot.stress.enable = m_enable_stress_tests;
+            snapshot.stress.bootstrap_iterations = m_bootstrap_iterations;
+            snapshot.stress.mcpt_iterations = m_mcpt_iterations;
+            snapshot.stress.seed = m_stress_seed;
 
             std::string clipboardPayload = RunConfigSerializer::Serialize(
                 snapshot,
@@ -1118,12 +1136,20 @@ void TradeSimulationWindow::SaveSimulation() {
     record.buckets.push_back(shortBucket);
 
     const auto& trades = m_simulator.GetTrades();
-    Stage1MetadataWriter::Instance().RecordSimulationRun(record, trades);
-    std::string ilpError;
-    if (!questdb::ExportTradingSimulation(record, trades, {}, &ilpError)) {
-        std::cerr << "[QuestDB] Failed to export trading simulation: " << ilpError << std::endl;
+    const bool stage1Online = Stage1MetadataWriter::NetworkExportsEnabled();
+    Stage1MetadataWriter::PersistMode mode = stage1Online
+        ? Stage1MetadataWriter::PersistMode::DatabaseAndFile
+        : Stage1MetadataWriter::PersistMode::FileOnly;
+    Stage1MetadataWriter::Instance().RecordSimulationRun(record, trades, mode);
+    if (stage1Online) {
+        std::string ilpError;
+        if (!questdb::ExportTradingSimulation(record, trades, {}, &ilpError)) {
+            std::cerr << "[QuestDB] Failed to export trading simulation: " << ilpError << std::endl;
+        }
+        m_saveStatusMessage = "Recorded simulation " + simulationMeasurement + " with " + std::to_string(trades.size()) + " trades.";
+    } else {
+        m_saveStatusMessage = "Simulation saved locally (Stage1 export disabled).";
     }
-    m_saveStatusMessage = "Recorded simulation " + simulationMeasurement + " with " + std::to_string(trades.size()) + " trades.";
 }
 
 void TradeSimulationWindow::DrawDrawdownChart() {

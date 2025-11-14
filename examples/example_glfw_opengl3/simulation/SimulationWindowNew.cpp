@@ -33,6 +33,7 @@
 #include <mutex>
 #include <memory>
 #include <any>
+#include <ctime>
 #include <arrow/table.h>
 #include <arrow/array.h>
 
@@ -76,6 +77,24 @@ std::string EscapeJson(const std::string& value) {
         }
     }
     return out;
+}
+
+std::string FormatUtcTimePoint(const std::chrono::system_clock::time_point& tp) {
+    if (tp.time_since_epoch().count() == 0) {
+        return {};
+    }
+    std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buffer[32];
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm) == 0) {
+        return {};
+    }
+    return buffer;
 }
 
 std::string WalkConfigToJson(const WalkForwardConfig& cfg) {
@@ -222,16 +241,6 @@ std::vector<std::string> ExtractFeatureColumns(const SimulationRun& run,
     }
     return {};
 }
-
-#if defined(_WIN32)
-void SetEnvVar(const char* key, const char* value) {
-    _putenv_s(key, value ? value : "");
-}
-#else
-void SetEnvVar(const char* key, const char* value) {
-    setenv(key, value ? value : "", 1);
-}
-#endif
 
 std::string ExtractTargetColumn(const SimulationRun& run,
                                 const ui::UniversalConfigWidget* widget) {
@@ -387,30 +396,41 @@ private:
             return;
         }
         
-        // Ensure a dataset is selected
         std::optional<DatasetMetadata> datasetMeta;
         if (timeSeriesWindow) {
             datasetMeta = timeSeriesWindow->GetActiveDataset();
         }
-        if (!datasetMeta) {
-            controlsWidget->SetStatusMessage("Select or export a dataset in the Dataset Manager before running.");
-            return;
+
+        std::string datasetSlug;
+        std::string indicatorMeasurement;
+        std::string datasetId;
+
+        if (datasetMeta) {
+            datasetSlug = !datasetMeta->dataset_slug.empty()
+                ? datasetMeta->dataset_slug
+                : datasetMeta->indicator_measurement;
+            if (datasetSlug.empty()) {
+                datasetSlug = datasetMeta->dataset_id;
+            }
+            if (datasetSlug.empty()) {
+                datasetSlug = "dataset";
+            }
+            indicatorMeasurement = !datasetMeta->indicator_measurement.empty()
+                ? datasetMeta->indicator_measurement
+                : datasetSlug;
+            datasetId = !datasetMeta->dataset_id.empty()
+                ? datasetMeta->dataset_id
+                : Stage1MetadataWriter::MakeDeterministicUuid(indicatorMeasurement);
+        } else {
+            datasetSlug = timeSeriesWindow ? timeSeriesWindow->GetSuggestedDatasetId() : "";
+            if (datasetSlug.empty()) {
+                datasetSlug = "dataset";
+            }
+            indicatorMeasurement = datasetSlug;
+            datasetId = Stage1MetadataWriter::MakeDeterministicUuid(indicatorMeasurement);
+            controlsWidget->SetStatusMessage(
+                "Running offline with local data (dataset '" + datasetSlug + "').");
         }
-        std::string datasetSlug = !datasetMeta->dataset_slug.empty()
-            ? datasetMeta->dataset_slug
-            : datasetMeta->indicator_measurement;
-        if (datasetSlug.empty()) {
-            datasetSlug = datasetMeta->dataset_id;
-        }
-        if (datasetSlug.empty()) {
-            datasetSlug = "dataset";
-        }
-        std::string indicatorMeasurement = !datasetMeta->indicator_measurement.empty()
-            ? datasetMeta->indicator_measurement
-            : datasetSlug;
-        std::string datasetId = !datasetMeta->dataset_id.empty()
-            ? datasetMeta->dataset_id
-            : Stage1MetadataWriter::MakeDeterministicUuid(indicatorMeasurement);
 
         // Get configuration
         auto features = configWidget->GetFeatures();
@@ -857,7 +877,10 @@ void SimulationWindow::Impl::PersistRun(const SimulationRun& run) {
         datasetSlug = "dataset";
     }
     datasetSlug = ToSlug(datasetSlug);
-    EnsureDatasetRegistered(datasetSlug);
+    const bool stage1Online = Stage1MetadataWriter::NetworkExportsEnabled();
+    if (stage1Online) {
+        EnsureDatasetRegistered(datasetSlug);
+    }
 
     std::string measurement = run.prediction_measurement;
     if (measurement.empty()) {
@@ -890,6 +913,10 @@ void SimulationWindow::Impl::PersistRun(const SimulationRun& run) {
         ? run.endTime : std::chrono::system_clock::now();
     record.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         record.completed_at - record.started_at).count();
+
+    Stage1MetadataWriter::PersistMode persistMode = stage1Online
+        ? Stage1MetadataWriter::PersistMode::DatabaseAndFile
+        : Stage1MetadataWriter::PersistMode::FileOnly;
 
     record.folds.reserve(run.foldResults.size());
     for (const auto& fold : run.foldResults) {
@@ -950,36 +977,30 @@ void SimulationWindow::Impl::PersistRun(const SimulationRun& run) {
         return;
     }
 
-    auto ensureEnv = [](const char* key, const char* fallback) {
-        const char* existing = std::getenv(key);
-        if (!existing || !*existing) {
-            SetEnvVar(key, fallback);
-        }
-    };
-    ensureEnv("STAGE1_POSTGRES_HOST", "45.85.147.236");
-    ensureEnv("STAGE1_POSTGRES_PORT", "5432");
-    ensureEnv("STAGE1_POSTGRES_DB", "stage1_trading");
-    ensureEnv("STAGE1_POSTGRES_USER", "stage1_app");
-    ensureEnv("STAGE1_POSTGRES_PASSWORD", "TempPass2025");
-
     resultsWidget->SetSaveStatus("Saving run '" + measurement + "'...", true);
 
-    std::string exportError;
-    if (!questdb::ExportWalkforwardPredictions(run, record, {}, &exportError)) {
-        QueueSaveStatus("QuestDB export failed for '" + measurement + "': " + exportError, false);
-        return;
+    if (stage1Online) {
+        std::string exportError;
+        if (!questdb::ExportWalkforwardPredictions(run, record, {}, &exportError)) {
+            QueueSaveStatus("QuestDB export failed for '" + measurement + "': " + exportError, false);
+            return;
+        }
     }
 
     std::string stage1Error;
-    if (!Stage1MetadataWriter::Instance().RecordWalkforwardRun(record, &stage1Error)) {
+    if (!Stage1MetadataWriter::Instance().RecordWalkforwardRun(record, &stage1Error, persistMode)) {
         const std::string message = stage1Error.empty()
-            ? "Stage1 export failed for '" + measurement + "'."
-            : "Stage1 export failed: " + stage1Error;
+            ? "Failed to save run '" + measurement + "'."
+            : stage1Error;
         QueueSaveStatus(message, false);
         return;
     }
     m_savedRunIds.insert(record.run_id);
-    QueueSaveStatus("Run exported to Stage1 (measurement '" + measurement + "').", true);
+    if (stage1Online) {
+        QueueSaveStatus("Run exported to Stage1 (measurement '" + measurement + "').", true);
+    } else {
+        QueueSaveStatus("Run saved locally (Stage1 export disabled).", true);
+    }
 }
 
 std::pair<std::optional<int64_t>, std::optional<int64_t>>
@@ -1066,8 +1087,18 @@ void SimulationWindow::Impl::EnsureDatasetRegistered(const std::string& datasetS
         }
     }
 
-    Stage1MetadataWriter::Instance().RecordDatasetExport(record);
-    m_registeredDatasets.insert(slug);
+    std::string metadataError;
+    Stage1MetadataWriter::PersistMode mode = Stage1MetadataWriter::NetworkExportsEnabled()
+        ? Stage1MetadataWriter::PersistMode::DatabaseAndFile
+        : Stage1MetadataWriter::PersistMode::FileOnly;
+
+    if (Stage1MetadataWriter::Instance().RecordDatasetExport(record, &metadataError, mode)) {
+        m_registeredDatasets.insert(slug);
+    } else {
+        std::cerr << "[SimulationWindow] Failed to register dataset '" << slug
+                  << "': " << (metadataError.empty() ? "unknown error" : metadataError)
+                  << std::endl;
+    }
 }
 
 void SimulationWindow::Impl::SaveRunAsync(const SimulationRun* run) {
@@ -1194,6 +1225,7 @@ void SimulationWindow::Impl::RefreshAvailableRuns() {
 
 void SimulationWindow::Impl::LoadSelectedRun() {
     Stage1MetadataReader::RunSummary summary;
+    int runIndex = -1;
     {
         std::lock_guard<std::mutex> lock(loadMutex);
         if (loadRunInProgress) {
@@ -1205,12 +1237,13 @@ void SimulationWindow::Impl::LoadSelectedRun() {
             return;
         }
         summary = savedRuns[selectedSavedRun];
+        runIndex = selectedSavedRun;
         const std::string label = summary.measurement.empty() ? summary.run_id : summary.measurement;
         loadRunStatus = "Loading run '" + label + "'...";
         loadRunInProgress = true;
     }
 
-    std::thread([this, summary]() {
+    std::thread([this, summary, runIndex]() {
         Stage1MetadataReader::RunPayload payload;
         std::string error;
         if (!Stage1MetadataReader::LoadRunPayload(summary.run_id, &payload, &error)) {
@@ -1233,6 +1266,23 @@ void SimulationWindow::Impl::LoadSelectedRun() {
             FinalizeRunLoad(false, error.empty() ? "Failed to rebuild run payload." : error);
             return;
         }
+
+        if (runIndex >= 0) {
+            const std::string startString = FormatUtcTimePoint(payload.started_at);
+            const std::string endString = FormatUtcTimePoint(payload.completed_at);
+            if (!startString.empty() || !endString.empty()) {
+                std::lock_guard<std::mutex> lock(loadMutex);
+                if (runIndex < static_cast<int>(savedRuns.size())) {
+                    if (!startString.empty()) {
+                        savedRuns[runIndex].started_at = startString;
+                    }
+                    if (!endString.empty()) {
+                        savedRuns[runIndex].completed_at = endString;
+                    }
+                }
+            }
+        }
+
         const std::string label = payload.prediction_measurement.empty()
             ? payload.run_id
             : payload.prediction_measurement;

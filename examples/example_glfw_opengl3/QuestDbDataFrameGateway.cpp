@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -16,6 +17,7 @@
 #include <vector>
 #include <cctype>
 #include <cstdlib>
+#include <iostream>
 
 #if defined(_WIN32)
 #    if defined(min)
@@ -63,10 +65,163 @@ std::string EscapeStringValue(const std::string& value) {
     return escaped;
 }
 
-int64_t GenerateFallbackTimestamp(size_t row_index) {
-    static constexpr int64_t base_timestamp = 1609459200000LL;  // 2021-01-01 UTC
-    static constexpr int64_t hour_in_ms = 3600000LL;
-    return base_timestamp + static_cast<int64_t>(row_index) * hour_in_ms;
+time_t ToUtcTimeT(std::tm* tm) {
+#if defined(_WIN32)
+    return _mkgmtime(tm);
+#else
+    return timegm(tm);
+#endif
+}
+
+std::optional<int64_t> ParseIsoToMillis(const std::string& text) {
+    if (text.size() < 19) {
+        return std::nullopt;
+    }
+    auto ParseInt = [&](size_t pos, size_t len) -> std::optional<int> {
+        if (pos + len > text.size()) return std::nullopt;
+        int value = 0;
+        for (size_t i = 0; i < len; ++i) {
+            char ch = text[pos + i];
+            if (ch < '0' || ch > '9') {
+                return std::nullopt;
+            }
+            value = value * 10 + (ch - '0');
+        }
+        return value;
+    };
+
+    auto year = ParseInt(0, 4);
+    auto month = ParseInt(5, 2);
+    auto day = ParseInt(8, 2);
+    auto hour = ParseInt(11, 2);
+    auto minute = ParseInt(14, 2);
+    auto second = ParseInt(17, 2);
+    if (!year || !month || !day || !hour || !minute || !second) {
+        return std::nullopt;
+    }
+
+    int64_t fractionMillis = 0;
+    auto dotPos = text.find('.', 19);
+    if (dotPos != std::string::npos) {
+        size_t fracStart = dotPos + 1;
+        size_t fracEnd = fracStart;
+        while (fracEnd < text.size() && std::isdigit(static_cast<unsigned char>(text[fracEnd]))) {
+            ++fracEnd;
+        }
+        std::string fraction = text.substr(fracStart, fracEnd - fracStart);
+        while (fraction.size() < 3) fraction.push_back('0');
+        if (fraction.size() > 3) fraction.resize(3);
+        fractionMillis = std::stoi(fraction);
+    }
+
+    std::tm tm = {};
+    tm.tm_year = *year - 1900;
+    tm.tm_mon = *month - 1;
+    tm.tm_mday = *day;
+    tm.tm_hour = *hour;
+    tm.tm_min = *minute;
+    tm.tm_sec = *second;
+    time_t seconds = ToUtcTimeT(&tm);
+    if (seconds == static_cast<time_t>(-1)) {
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(seconds) * 1000LL + fractionMillis;
+}
+
+std::optional<int64_t> ScalarToMillis(const std::shared_ptr<arrow::Scalar>& scalar,
+                                      bool coerce_seconds_to_millis) {
+    if (!scalar || !scalar->is_valid) {
+        return std::nullopt;
+    }
+    switch (scalar->type->id()) {
+        case arrow::Type::INT64: {
+            int64_t value = std::static_pointer_cast<arrow::Int64Scalar>(scalar)->value;
+            if (coerce_seconds_to_millis && std::llabs(value) < 4'000'000'000LL) {
+                value *= 1000;
+            }
+            return value;
+        }
+        case arrow::Type::INT32: {
+            int64_t value = std::static_pointer_cast<arrow::Int32Scalar>(scalar)->value;
+            if (coerce_seconds_to_millis && std::llabs(value) < 4'000'000'000LL) {
+                value *= 1000;
+            }
+            return value;
+        }
+        case arrow::Type::DOUBLE:
+        case arrow::Type::FLOAT: {
+            double numeric = (scalar->type->id() == arrow::Type::DOUBLE)
+                ? std::static_pointer_cast<arrow::DoubleScalar>(scalar)->value
+                : static_cast<double>(std::static_pointer_cast<arrow::FloatScalar>(scalar)->value);
+            int64_t value = static_cast<int64_t>(std::llround(numeric));
+            if (coerce_seconds_to_millis && std::llabs(value) < 4'000'000'000LL) {
+                value *= 1000;
+            }
+            return value;
+        }
+        case arrow::Type::STRING:
+        case arrow::Type::LARGE_STRING: {
+            auto text = scalar->ToString();
+            if (text.empty()) {
+                return std::nullopt;
+            }
+            bool isNumeric = std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+                return std::isdigit(ch) || ch == '-' || ch == '+';
+            });
+            if (isNumeric) {
+                try {
+                    int64_t value = std::stoll(text);
+                    if (coerce_seconds_to_millis && std::llabs(value) < 4'000'000'000LL) {
+                        value *= 1000;
+                    }
+                    return value;
+                } catch (...) {
+                }
+            }
+            return ParseIsoToMillis(text);
+        }
+        case arrow::Type::TIMESTAMP: {
+            auto tsScalar = std::static_pointer_cast<arrow::TimestampScalar>(scalar);
+            int64_t value = tsScalar->value;
+            auto type = std::static_pointer_cast<arrow::TimestampType>(tsScalar->type);
+            switch (type->unit()) {
+                case arrow::TimeUnit::SECOND: return value * 1000;
+                case arrow::TimeUnit::MILLI: return value;
+                case arrow::TimeUnit::MICRO: return value / 1000;
+                case arrow::TimeUnit::NANO: return value / 1000000;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return std::nullopt;
+}
+
+const char* kTimestampCandidates[] = {
+    "timestamp_unix",
+    "timestamp",
+    "timestamp_seconds",
+    "timestamp_unix_s",
+    "ts",
+    "time"
+};
+
+std::string DetectTimestampColumn(const std::shared_ptr<arrow::Schema>& schema,
+                                  const std::string& preferred) {
+    if (!schema) {
+        return {};
+    }
+    if (!preferred.empty()) {
+        return schema->GetFieldIndex(preferred) >= 0 ? preferred : std::string();
+    }
+    for (const char* candidate : kTimestampCandidates) {
+        if (!candidate) continue;
+        if (schema->GetFieldIndex(candidate) >= 0) {
+            return candidate;
+        }
+    }
+    return {};
 }
 
 struct CurlFileContext {
@@ -107,27 +262,6 @@ std::string ReadFilePrefix(const std::filesystem::path& path, size_t maxBytes) {
     in.read(buffer.data(), static_cast<std::streamsize>(maxBytes));
     buffer.resize(static_cast<size_t>(in.gcount()));
     return buffer;
-}
-
-int64_t GetTimestamp(const chronosflow::AnalyticsDataFrame& df,
-                     const std::string& column_name,
-                     size_t row_index,
-                     bool coerce_seconds) {
-    auto times_col_res = df.get_column_view<int64_t>(column_name);
-    if (times_col_res.ok()) {
-        auto view = std::move(times_col_res).ValueOrDie();
-        if (row_index < view.size()) {
-            const int64_t* data = view.data();
-            if (data) {
-                int64_t timestamp = data[row_index];
-                if (timestamp != 0 && coerce_seconds && std::llabs(timestamp) < 4'000'000'000LL) {
-                    return timestamp * 1000;
-                }
-                return timestamp;
-            }
-        }
-    }
-    return GenerateFallbackTimestamp(row_index);
 }
 
 std::string EscapeTagValue(const std::string& value) {
@@ -246,13 +380,26 @@ bool DataFrameGateway::Export(const chronosflow::AnalyticsDataFrame& dataframe,
     std::ostringstream lines;
     lines.setf(std::ios::fixed, std::ios::floatfield);
 
-    std::string timestampColumnName = spec.timestamp_column.empty() ? "timestamp_unix" : spec.timestamp_column;
-    int timestampColumnIndex = schema->GetFieldIndex(timestampColumnName);
-    if (timestampColumnIndex < 0 && timestampColumnName != "timestamp_unix") {
-        timestampColumnIndex = schema->GetFieldIndex("timestamp_unix");
-        if (timestampColumnIndex >= 0) {
-            timestampColumnName = "timestamp_unix";
+    std::string timestampColumnName = DetectTimestampColumn(schema, spec.timestamp_column);
+    if (timestampColumnName.empty()) {
+        if (error) {
+            *error = "Dataset is missing a timestamp column (expected one of: timestamp_unix, timestamp, timestamp_seconds, timestamp_unix_s, ts, time).";
         }
+        return false;
+    }
+    int timestampColumnIndex = schema->GetFieldIndex(timestampColumnName);
+    if (timestampColumnIndex < 0) {
+        if (error) {
+            *error = "Timestamp column '" + timestampColumnName + "' not found.";
+        }
+        return false;
+    }
+    auto timestampColumn = table->column(timestampColumnIndex);
+    if (!timestampColumn) {
+        if (error) {
+            *error = "Timestamp column '" + timestampColumnName + "' is unavailable.";
+        }
+        return false;
     }
 
     const auto measurementEscaped = EscapeIdentifier(sanitizedMeasurement);
@@ -267,6 +414,13 @@ bool DataFrameGateway::Export(const chronosflow::AnalyticsDataFrame& dataframe,
     std::vector<bool> skipColumn(numColumns, false);
     if (timestampColumnIndex >= 0 && timestampColumnIndex < numColumns) {
         skipColumn[timestampColumnIndex] = true;
+    }
+    int timestampFieldColumnIndex = -1;
+    if (spec.emit_timestamp_field && !spec.timestamp_field_name.empty()) {
+        timestampFieldColumnIndex = schema->GetFieldIndex(spec.timestamp_field_name);
+        if (timestampFieldColumnIndex >= 0 && timestampFieldColumnIndex < numColumns) {
+            skipColumn[timestampFieldColumnIndex] = true;
+        }
     }
     for (const auto& tagName : spec.tag_columns) {
         int idx = schema->GetFieldIndex(tagName);
@@ -373,39 +527,35 @@ bool DataFrameGateway::Export(const chronosflow::AnalyticsDataFrame& dataframe,
                                 << '=' << EscapeTagValue(scalar->ToString());
         }
 
-        if (fieldCount == 0) {
-            continue;
+        auto tsScalarResult = timestampColumn->GetScalar(row);
+        if (!tsScalarResult.ok()) {
+            if (error) {
+                *error = "Failed to read timestamp for row " + std::to_string(row) + ": "
+                    + tsScalarResult.status().ToString();
+            }
+            return false;
+        }
+        auto tsScalar = tsScalarResult.ValueOrDie();
+        auto timestampOpt = ScalarToMillis(tsScalar, spec.coerce_seconds_to_millis);
+        if (!timestampOpt || *timestampOpt == 0) {
+            if (error) {
+                *error = "Row " + std::to_string(row) + " is missing a valid timestamp in column '"
+                    + timestampColumnName + "'.";
+            }
+            return false;
+        }
+        int64_t timestampMs = *timestampOpt;
+
+        if (spec.emit_timestamp_field && !spec.timestamp_field_name.empty()) {
+            if (fieldCount > 0) {
+                fields << ',';
+            }
+            fields << EscapeIdentifier(spec.timestamp_field_name) << '='
+                   << timestampMs << 'i';
+            ++fieldCount;
         }
 
-        int64_t timestampMs = 0;
-        if (timestampColumnIndex >= 0) {
-            auto tsColumn = table->column(timestampColumnIndex);
-            auto tsScalarResult = tsColumn->GetScalar(row);
-            if (tsScalarResult.ok()) {
-                auto tsScalar = tsScalarResult.ValueOrDie();
-                if (tsScalar && tsScalar->is_valid &&
-                    tsColumn->type()->id() == arrow::Type::INT64) {
-                    timestampMs = std::static_pointer_cast<arrow::Int64Scalar>(tsScalar)->value;
-                    if (timestampMs != 0 && spec.coerce_seconds_to_millis &&
-                        std::llabs(timestampMs) < 4'000'000'000LL) {
-                        timestampMs *= 1000;
-                    }
-                }
-            }
-        }
-        if (timestampMs == 0) {
-            timestampMs = GetTimestamp(dataframe,
-                                       timestampColumnName.empty() ? "timestamp_unix" : timestampColumnName,
-                                       static_cast<size_t>(row),
-                                       spec.coerce_seconds_to_millis);
-        }
-        if (timestampMs == 0 && timestampColumnName != "timestamp_unix") {
-            timestampMs = GetTimestamp(dataframe,
-                                       "timestamp_unix",
-                                       static_cast<size_t>(row),
-                                       spec.coerce_seconds_to_millis);
-        }
-        if (timestampMs == 0) {
+        if (fieldCount == 0) {
             continue;
         }
 

@@ -65,19 +65,99 @@ bool ParseTimestampFlexible(const std::string& text, std::chrono::system_clock::
     if (!tp || text.empty()) {
         return false;
     }
-    std::string sanitized = text;
-    if (!sanitized.empty() && (sanitized.back() == 'Z' || sanitized.back() == 'z')) {
-        sanitized.pop_back();
+
+    std::string working = text;
+    // Trim trailing Z/z (UTC designator)
+    if (!working.empty() && (working.back() == 'Z' || working.back() == 'z')) {
+        working.pop_back();
     }
-    std::replace(sanitized.begin(), sanitized.end(), 'T', ' ');
-    auto dotPos = sanitized.find('.');
+
+    // Normalize separator
+    auto tPos = working.find('T');
+    if (tPos != std::string::npos) {
+        working[tPos] = ' ';
+    }
+
+    // Extract timezone offset (e.g., +02:00 or -0530)
+    int offsetMinutes = 0;
+    auto LocateTzPos = [](const std::string& value) -> std::size_t {
+        std::size_t searchStart = value.find(' ');
+        if (searchStart == std::string::npos) {
+            searchStart = value.find('T');
+        }
+        if (searchStart == std::string::npos) {
+            searchStart = 0;
+        }
+        return value.find_first_of("+-", searchStart + 1);
+    };
+
+    const std::size_t tzPos = LocateTzPos(working);
+    if (tzPos != std::string::npos) {
+        const char sign = working[tzPos];
+        std::string offset = working.substr(tzPos + 1);
+        working = working.substr(0, tzPos);
+        offset.erase(std::remove(offset.begin(), offset.end(), ':'), offset.end());
+        if (!offset.empty()) {
+            int hours = 0;
+            int minutes = 0;
+            try {
+                if (offset.size() >= 2) {
+                    hours = std::stoi(offset.substr(0, 2));
+                }
+                if (offset.size() >= 4) {
+                    minutes = std::stoi(offset.substr(2, 2));
+                }
+                offsetMinutes = hours * 60 + minutes;
+                if (sign == '-') {
+                    offsetMinutes = -offsetMinutes;
+                }
+            } catch (...) {
+                offsetMinutes = 0;
+            }
+        }
+    }
+
+    // Extract fractional seconds (keep millisecond precision)
+    int64_t fractionalMillis = 0;
+    auto dotPos = working.find('.');
     if (dotPos != std::string::npos) {
-        sanitized = sanitized.substr(0, dotPos);
+        std::string fraction = working.substr(dotPos + 1);
+        working = working.substr(0, dotPos);
+        while (fraction.size() < 3) {
+            fraction.push_back('0');
+        }
+        if (fraction.size() > 3) {
+            fraction.resize(3);
+        }
+        try {
+            fractionalMillis = std::stoll(fraction);
+        } catch (...) {
+            fractionalMillis = 0;
+        }
     }
-    if (ParseTimestampBasic(sanitized, tp)) {
-        return true;
+
+    std::tm tm = {};
+    std::istringstream ss(working);
+    ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+    if (ss.fail()) {
+        return false;
     }
-    return ParseTimestampBasic(text, tp);
+#if defined(_WIN32)
+    time_t tt = _mkgmtime(&tm);
+#else
+    time_t tt = timegm(&tm);
+#endif
+    if (tt == static_cast<time_t>(-1)) {
+        return false;
+    }
+
+    auto base = std::chrono::system_clock::from_time_t(tt);
+    if (offsetMinutes != 0) {
+        base -= std::chrono::minutes(offsetMinutes);
+    }
+    base += std::chrono::milliseconds(fractionalMillis);
+    *tp = base;
+    return true;
 }
 
 void ParseStringArray(const rapidjson::Value& value, std::vector<std::string>* out) {

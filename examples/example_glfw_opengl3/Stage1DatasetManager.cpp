@@ -639,14 +639,13 @@ void Stage1DatasetManager::LoadSelectedDataset() {
     metadata.ohlcv_rows = row.ohlcv_rows;
 
     bool ohlcvLoaded = true;
-    if (m_candlestickChart && !row.ohlcv_measurement.empty()) {
-        std::string qdbStatus;
-        if (!m_candlestickChart->LoadFromQuestDb(row.ohlcv_measurement, &qdbStatus)) {
+    if (m_candlestickChart && !row.dataset_id.empty()) {
+        std::string status;
+        if (!m_candlestickChart->LoadFromStage1(row.dataset_id, &status)) {
             ohlcvLoaded = false;
-            std::string measurementLabel = row.ohlcv_measurement.empty() ? "<unspecified>" : row.ohlcv_measurement;
-            m_statusMessage = "Failed to load OHLCV measurement '" + measurementLabel + "'.";
-            if (!qdbStatus.empty()) {
-                m_statusMessage += " " + qdbStatus;
+            m_statusMessage = "Failed to load OHLCV for dataset " + row.dataset_id + ".";
+            if (!status.empty()) {
+                m_statusMessage += " " + status;
             }
             m_statusSuccess = false;
         }

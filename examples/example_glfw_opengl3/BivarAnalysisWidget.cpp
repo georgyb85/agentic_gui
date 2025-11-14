@@ -99,7 +99,7 @@ void BivarAnalysisWidget::DrawColumnSelection() {
     
     for (size_t i = 0; i < m_availableColumns.size(); i++) {
         if (m_availableColumns[i] == "Date" || m_availableColumns[i] == "Time" || 
-            m_availableColumns[i] == "timestamp_unix") {
+            m_availableColumns[i] == "timestamp_unix" || m_availableColumns[i] == "timestamp") {
             continue; // Skip time columns
         }
         
@@ -120,7 +120,7 @@ void BivarAnalysisWidget::DrawColumnSelection() {
     
     for (size_t i = 0; i < m_availableColumns.size(); i++) {
         if (m_availableColumns[i] == "Date" || m_availableColumns[i] == "Time" || 
-            m_availableColumns[i] == "timestamp_unix") {
+            m_availableColumns[i] == "timestamp_unix" || m_availableColumns[i] == "timestamp") {
             continue; // Skip time columns
         }
         

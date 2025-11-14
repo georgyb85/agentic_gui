@@ -21,7 +21,7 @@ SOURCES = main.cpp utils.cpp candlestick_chart.cpp NewsWindow.cpp TickerSelector
           analytics_dataframe.cpp chronosflow.cpp dataframe_io.cpp tssb_timestamp.cpp \
           feature_utils.cpp bivariate_analysis_exact.cpp modern_algorithms.cpp modern_discretizer.cpp \
           SimpleTradeExecutor.cpp \
-          QuestDbExports.cpp QuestDbDataFrameGateway.cpp QuestDbImports.cpp RunConfigSerializer.cpp Stage1ServerWindow.cpp Stage1DatasetManager.cpp Stage1MetadataReader.cpp \
+          QuestDbExports.cpp QuestDbDataFrameGateway.cpp QuestDbImports.cpp RunConfigSerializer.cpp Stage1ServerWindow.cpp Stage1DatasetManager.cpp Stage1MetadataReader.cpp Stage1DatasetManifest.cpp \
           modern_indicators/src/IndicatorConfig.cpp modern_indicators/src/IndicatorEngine.cpp modern_indicators/src/IndicatorId.cpp \
           modern_indicators/src/MathUtils.cpp modern_indicators/src/MultiIndicatorLibrary.cpp modern_indicators/src/SingleIndicatorLibrary.cpp \
           modern_indicators/src/TaskExecutor.cpp modern_indicators/src/validation/DataParsers.cpp \
@@ -65,7 +65,7 @@ LIBS =
 ifeq ($(UNAME_S), Linux) #LINUX
 	ECHO_MESSAGE = "Linux"
 	LIBS += $(LINUX_GL_LIBS) `pkg-config --static --libs glfw3`
-	LIBS += -lcurl
+	LIBS += -lcurl -lpq
 
 	CXXFLAGS += `pkg-config --cflags glfw3`
 	CFLAGS = $(CXXFLAGS)
@@ -77,7 +77,7 @@ ifeq ($(UNAME_S), Darwin) #APPLE
 	LIBS += -L/usr/local/lib -L/opt/local/lib -L/opt/homebrew/lib
 	#LIBS += -lglfw3
 	LIBS += -lglfw
-	LIBS += -lcurl
+	LIBS += -lcurl -lpq
 
 	CXXFLAGS += -I/usr/local/include -I/opt/local/include -I/opt/homebrew/include
 	CFLAGS = $(CXXFLAGS)
@@ -86,7 +86,7 @@ endif
 ifeq ($(OS), Windows_NT)
 	ECHO_MESSAGE = "MinGW"
 	LIBS += -lglfw3 -lgdi32 -lopengl32 -limm32
-	LIBS += -lcurl
+	LIBS += -lcurl -lpq
 
 	CXXFLAGS += `pkg-config --cflags glfw3`
 	CFLAGS = $(CXXFLAGS)

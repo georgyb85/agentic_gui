@@ -143,6 +143,83 @@ List all walkforward runs for a specific dataset.
 }
 ```
 
+### GET /api/datasets/{id}/indicators
+Return raw indicator rows for a dataset (the GPU/XGBoost services and the walkforward UI rely on this endpoint).
+
+**Query Parameters:**
+- `start_timestamp` / `end_timestamp` (optional, ms since epoch) – inclusive window filters.
+- `start_index` / `end_index` (optional, zero-based) – fetch by raw bar index. When supplied, the server translates these into the proper `LIMIT/OFFSET`. `end_index` is exclusive.
+- `limit` (optional, default: 5000, max: 200000) – maximum number of rows (applied after `end_index` trimming).
+- `desc` (optional, default: `false`) – sort direction.
+- `timestamp_column` (optional) – override the timestamp column used in the `WHERE` clause (defaults to probing `timestamp`, `timestamp_unix`, etc.).
+- `columns` (optional) – comma‑separated column whitelist (e.g., feature + target set).
+
+**Response:**
+```json
+{
+  "measurement": "btc_1h_indicators",
+  "count": 650,
+  "rows": [
+    {
+      "timestamp_ms": 1732831200000,
+      "rsi_14": 55.1,
+      "pcv_10_20": -4.25,
+      "TGT_115": -0.0012
+    }
+  ],
+  "questdb": { "... full QuestDB payload ..." }
+}
+```
+
+Each row now includes a canonical `timestamp_ms` column emitted by the ingestion pipeline, so clients no longer need to reconstruct epochs from `Date`/`Time`.
+Rows returned from this endpoint are inner-joined with the dataset's OHLCV measurement, ensuring that every indicator bar has a corresponding OHLCV bar.
+
+### GET /api/datasets/{id}/manifest
+Return the dataset manifest describing the canonical timestamp range, bar interval, lookback, and measurements. This is generated at export time and stored in the dataset metadata JSON.
+
+**Response:**
+```json
+{
+  "version": 1,
+  "dataset_id": "4931fd4d-487b-451f-9b27-8e9eedd03e68",
+  "dataset_slug": "t_ind6",
+  "granularity": "1h",
+  "source": "laptop_imgui",
+  "ohlcv_measurement": "t_ind6_ohlcv",
+  "indicator_measurement": "t_ind6_ind6",
+  "bar_interval_ms": 3600000,
+  "lookback_rows": 48,
+  "first_ohlcv_timestamp_ms": 1688169600000,
+  "last_ohlcv_timestamp_ms": 1735185600000,
+  "first_indicator_timestamp_ms": 1688186880000,
+  "last_indicator_timestamp_ms": 1735185600000,
+  "ohlcv_rows": 679,
+  "indicator_rows": 631,
+  "exported_at": "2025-11-12T00:05:18Z"
+}
+```
+
+### GET /api/datasets/{id}/index_map
+Convert raw row indices into timestamps without fetching every indicator column.
+
+**Query Parameters:**
+- `start_idx` (required): starting index (inclusive).
+- `end_idx` (required): ending index (exclusive).
+- `type` (optional, default `indicator`): `indicator` or `ohlcv`.
+
+**Response:**
+```json
+{
+  "measurement": "t_ind6",
+  "start_index": 520,
+  "end_index": 530,
+  "rows": [
+    { "index": 520, "timestamp_ms": 1734699600000 },
+    { "index": 521, "timestamp_ms": 1734703200000 }
+  ]
+}
+```
+
 ---
 
 ## Run Endpoints

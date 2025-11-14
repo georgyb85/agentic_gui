@@ -113,7 +113,8 @@ private:
     // File operations
     void LoadCSVFile(const std::string& filepath);
     void TriggerQuestDBExport();
-    void LoadQuestDBTable(const std::string& tableName);
+    void LoadQuestDBTable(const std::string& tableName); // DEPRECATED: Direct QuestDB access
+    void LoadFromStage1(const std::string& datasetId);
     bool ExportToQuestDB(const std::string& tableName, std::string& statusMessage);
     std::pair<std::optional<int64_t>, std::optional<int64_t>> ExtractTimestampBounds(const std::shared_ptr<arrow::Table>& table) const;
     void ClearData();

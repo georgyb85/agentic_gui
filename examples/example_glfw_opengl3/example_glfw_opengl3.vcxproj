@@ -92,7 +92,7 @@
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;C:\src\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <OpenMPSupport>true</OpenMPSupport>
@@ -100,7 +100,7 @@
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>..\libs\glfw\lib-vc2010-32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;libpq.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
       <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
@@ -126,7 +126,7 @@
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\src\BTCPredictor\xgboost\lib;..\libs\glfw\lib-vc2010-64;C:\src\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;libpq.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
       <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
       <AdditionalOptions>/FORCE:MULTIPLE %(AdditionalOptions)</AdditionalOptions>
@@ -146,7 +146,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..;..\..\backends;..\libs\glfw\include;C:\src\agentic_gui\implot;.\eigen-3.4.0;.\stepwise;.\modern_indicators\include;C:\src\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <AdditionalOptions>/utf-8 /openmp %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -157,7 +157,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalLibraryDirectories>..\libs\glfw\lib-vc2010-32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;libpq.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
       <IgnoreSpecificDefaultLibraries>
       </IgnoreSpecificDefaultLibraries>
@@ -182,7 +182,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalLibraryDirectories>C:\src\BTCPredictor\xgboost\lib;..\libs\glfw\lib-vc2010-64;C:\src\vcpkg\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;glfw3.lib;libpq.lib;arrow.lib;parquet.lib;arrow_compute.lib;xgboost.lib;cudart_static.lib;cublas.lib;cusolver.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
       <IgnoreSpecificDefaultLibraries>
       </IgnoreSpecificDefaultLibraries>
@@ -286,6 +286,7 @@
     <ClCompile Include="RunConfigSerializer.cpp"/>
     <ClCompile Include="Stage1ServerWindow.cpp"/>
     <ClCompile Include="Stage1DatasetManager.cpp"/>
+    <ClCompile Include="Stage1DatasetManifest.cpp"/>
     <ClCompile Include="Stage1MetadataReader.cpp"/>
     <ClCompile Include="Stage1RestClient.cpp"/>
     <ClCompile Include="modern_indicators\src\IndicatorConfig.cpp"/>
@@ -324,6 +325,7 @@
     <ClInclude Include="TimeSeries.h"/>
     <ClInclude Include="Stage1ServerWindow.h"/>
     <ClInclude Include="Stage1DatasetManager.h"/>
+    <ClInclude Include="Stage1DatasetManifest.h"/>
     <ClInclude Include="QuestDbImports.h"/>
     <ClInclude Include="Stage1MetadataReader.h"/>
     <ClInclude Include="Stage1RestClient.h"/>

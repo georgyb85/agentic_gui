@@ -133,6 +133,16 @@ public:
                         RunDetail* detail,
                         std::string* error);
 
+    bool FetchDatasetOhlcv(const std::string& datasetId,
+                           Json::Value* rows,
+                           std::string* error,
+                           int limit = 0);
+
+    bool FetchDatasetIndicators(const std::string& datasetId,
+                                Json::Value* rows,
+                                std::string* error,
+                                int limit = 0);
+
     bool SubmitQuestDbImport(const std::string& measurement,
                              const std::string& csvData,
                              const std::string& filenameHint,

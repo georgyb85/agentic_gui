@@ -24,6 +24,9 @@
 #include <fstream>
 #include <system_error>
 #include <optional>
+#include <map>
+#include <initializer_list>
+#include <ctime>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -55,6 +58,7 @@
 #endif
 #endif
 #include <arrow/array.h>
+#include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/compute/registry.h>
 #include <arrow/scalar.h>
@@ -62,6 +66,8 @@
 #include <arrow/type.h>
 
 #include "QuestDbDataFrameGateway.h"
+#include "Stage1RestClient.h"
+#include <json/json.h>
 
 namespace {
 std::string SanitizeSlug(const std::string& value) {
@@ -119,6 +125,258 @@ std::string ParseGranularity(const std::string& measurement) {
     pos = measurement.find("_1d");
     if (pos != std::string::npos) return "1d";
     return "unknown";
+}
+
+int64_t NormalizeTimestampMs(int64_t raw) {
+    if (raw == 0) {
+        return 0;
+    }
+    const int64_t absValue = std::llabs(raw);
+    constexpr int64_t kNanoThreshold = 10'000'000'000'000'000LL;
+    constexpr int64_t kMicroThreshold = 10'000'000'000'000LL;
+    constexpr int64_t kMillisThreshold = 100'000'000'000LL;
+    if (absValue >= kNanoThreshold) {
+        return raw / 1'000'000LL;
+    }
+    if (absValue >= kMicroThreshold) {
+        return raw / 1'000LL;
+    }
+    if (absValue >= kMillisThreshold) {
+        return raw;
+    }
+    return raw * 1000LL;
+}
+
+std::optional<int64_t> ParseIsoToMillis(const std::string& text) {
+    if (text.size() < 19) {
+        return std::nullopt;
+    }
+    auto ParseInt = [&](size_t pos, size_t len) -> std::optional<int> {
+        if (pos + len > text.size()) return std::nullopt;
+        int value = 0;
+        for (size_t i = 0; i < len; ++i) {
+            char ch = text[pos + i];
+            if (ch < '0' || ch > '9') {
+                return std::nullopt;
+            }
+            value = value * 10 + (ch - '0');
+        }
+        return value;
+    };
+
+    auto year = ParseInt(0, 4);
+    auto month = ParseInt(5, 2);
+    auto day = ParseInt(8, 2);
+    auto hour = ParseInt(11, 2);
+    auto minute = ParseInt(14, 2);
+    auto second = ParseInt(17, 2);
+    if (!year || !month || !day || !hour || !minute || !second) {
+        return std::nullopt;
+    }
+
+    int64_t fractionMillis = 0;
+    auto dotPos = text.find('.', 19);
+    if (dotPos != std::string::npos) {
+        size_t fracStart = dotPos + 1;
+        size_t fracEnd = fracStart;
+        while (fracEnd < text.size() && std::isdigit(static_cast<unsigned char>(text[fracEnd]))) {
+            ++fracEnd;
+        }
+        std::string fraction = text.substr(fracStart, fracEnd - fracStart);
+        while (fraction.size() < 3) fraction.push_back('0');
+        if (fraction.size() > 3) fraction.resize(3);
+        try {
+            fractionMillis = std::stoll(fraction);
+        } catch (...) {
+            fractionMillis = 0;
+        }
+    }
+
+    std::tm tm = {};
+    tm.tm_year = *year - 1900;
+    tm.tm_mon = *month - 1;
+    tm.tm_mday = *day;
+    tm.tm_hour = *hour;
+    tm.tm_min = *minute;
+    tm.tm_sec = *second;
+#if defined(_WIN32)
+    time_t seconds = _mkgmtime(&tm);
+#else
+    time_t seconds = timegm(&tm);
+#endif
+    if (seconds == static_cast<time_t>(-1)) {
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(seconds) * 1000LL + fractionMillis;
+}
+
+std::string ChunkedValueToString(const std::shared_ptr<arrow::ChunkedArray>& column, int64_t row) {
+    if (!column) {
+        return "[Missing]";
+    }
+    int64_t offset = row;
+    for (const auto& chunk : column->chunks()) {
+        if (!chunk) {
+            continue;
+        }
+        if (offset < chunk->length()) {
+            if (!chunk->IsValid(offset)) {
+                return "N/A";
+            }
+            return chunk->FormatValue(offset);
+        }
+        offset -= chunk->length();
+    }
+    return "N/A";
+}
+
+arrow::Result<chronosflow::AnalyticsDataFrame> EnsureTimestampUnixColumn(chronosflow::AnalyticsDataFrame&& frame) {
+    auto table = frame.get_cpu_table();
+    if (!table) {
+        return arrow::Status::Invalid("QuestDB table is empty.");
+    }
+    if (table->GetColumnByName("timestamp_unix")) {
+        return std::move(frame);
+    }
+    auto schema = table->schema();
+    if (!schema) {
+        return arrow::Status::Invalid("QuestDB schema unavailable.");
+    }
+    int timestampIdx = schema->GetFieldIndex("timestamp");
+    if (timestampIdx < 0) {
+        return arrow::Status::Invalid("Dataset is missing the required 'timestamp' column.");
+    }
+    auto source = table->column(timestampIdx);
+    if (!source) {
+        return arrow::Status::Invalid("Timestamp column is unavailable.");
+    }
+
+    arrow::Int64Builder builder;
+    ARROW_RETURN_NOT_OK(builder.Reserve(table->num_rows()));
+
+    for (const auto& chunk : source->chunks()) {
+        if (!chunk) {
+            continue;
+        }
+        switch (chunk->type_id()) {
+            case arrow::Type::TIMESTAMP: {
+                auto tsChunk = std::static_pointer_cast<arrow::TimestampArray>(chunk);
+                auto type = std::static_pointer_cast<arrow::TimestampType>(tsChunk->type());
+                for (int64_t i = 0; i < tsChunk->length(); ++i) {
+                    if (!tsChunk->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    int64_t value = tsChunk->Value(i);
+                    switch (type->unit()) {
+                        case arrow::TimeUnit::SECOND: value *= 1000; break;
+                        case arrow::TimeUnit::MILLI: break;
+                        case arrow::TimeUnit::MICRO: value /= 1000; break;
+                        case arrow::TimeUnit::NANO: value /= 1000000; break;
+                    }
+                    builder.Append(value);
+                }
+                break;
+            }
+            case arrow::Type::INT64: {
+                auto arr = std::static_pointer_cast<arrow::Int64Array>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(arr->Value(i)));
+                }
+                break;
+            }
+            case arrow::Type::INT32: {
+                auto arr = std::static_pointer_cast<arrow::Int32Array>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(arr->Value(i)));
+                }
+                break;
+            }
+            case arrow::Type::UINT64: {
+                auto arr = std::static_pointer_cast<arrow::UInt64Array>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(static_cast<int64_t>(arr->Value(i))));
+                }
+                break;
+            }
+            case arrow::Type::UINT32: {
+                auto arr = std::static_pointer_cast<arrow::UInt32Array>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(static_cast<int64_t>(arr->Value(i))));
+                }
+                break;
+            }
+            case arrow::Type::DOUBLE: {
+                auto arr = std::static_pointer_cast<arrow::DoubleArray>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(static_cast<int64_t>(std::llround(arr->Value(i)))));
+                }
+                break;
+            }
+            case arrow::Type::FLOAT: {
+                auto arr = std::static_pointer_cast<arrow::FloatArray>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    builder.Append(NormalizeTimestampMs(static_cast<int64_t>(std::llround(arr->Value(i)))));
+                }
+                break;
+            }
+            case arrow::Type::STRING:
+            case arrow::Type::LARGE_STRING: {
+                auto arr = std::static_pointer_cast<arrow::StringArray>(chunk);
+                for (int64_t i = 0; i < arr->length(); ++i) {
+                    if (!arr->IsValid(i)) {
+                        builder.AppendNull();
+                        continue;
+                    }
+                    auto parsed = ParseIsoToMillis(arr->GetString(i));
+                    if (parsed) {
+                        builder.Append(*parsed);
+                    } else {
+                        builder.AppendNull();
+                    }
+                }
+                break;
+            }
+            default: {
+                for (int64_t i = 0; i < chunk->length(); ++i) {
+                    builder.AppendNull();
+                }
+                break;
+            }
+        }
+    }
+
+    std::shared_ptr<arrow::Array> unixArray;
+    ARROW_RETURN_NOT_OK(builder.Finish(&unixArray));
+    auto newColumn = std::make_shared<arrow::ChunkedArray>(unixArray);
+    auto field = arrow::field("timestamp_unix", arrow::int64());
+    ARROW_ASSIGN_OR_RAISE(auto rebuiltTable, table->AddColumn(table->num_columns(), field, newColumn));
+    chronosflow::AnalyticsDataFrame rebuiltFrame(rebuiltTable);
+    return rebuiltFrame;
 }
 
 
@@ -233,15 +491,8 @@ TimeSeriesWindow::TimeSeriesWindow()
 
 void TimeSeriesWindow::LoadDatasetFromMetadata(const DatasetMetadata& metadata) {
     m_activeDataset = metadata;
-    std::string measurement = metadata.indicator_measurement.empty()
-        ? metadata.dataset_slug
-        : metadata.indicator_measurement;
-    if (measurement.empty()) {
-        measurement = metadata.dataset_id;
-    }
-    if (!measurement.empty()) {
-        m_lastQuestDbMeasurement = measurement;
-        LoadQuestDBTable(measurement);
+    if (!metadata.dataset_id.empty()) {
+        LoadFromStage1(metadata.dataset_id);
     }
 }
 
@@ -332,61 +583,66 @@ void TimeSeriesWindow::Draw() {
         if (result.ok()) {
             auto df = std::make_unique<chronosflow::AnalyticsDataFrame>(std::move(result).ValueOrDie());
 
-            const auto& columns = df->column_names();
-            auto find_case_insensitive = [](const std::vector<std::string>& cols, const std::string& name_to_find) {
-                return std::find_if(cols.begin(), cols.end(), [&](const std::string& col_name) {
-                    std::string lower_name = col_name;
-                    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
-                    std::string target_name = name_to_find;
-                    std::transform(target_name.begin(), target_name.end(), target_name.begin(), ::tolower);
-                    return lower_name == target_name;
-                });
-            };
+            if (!wasQuestDBFetch) {
+                const auto& columns = df->column_names();
+                auto find_case_insensitive = [](const std::vector<std::string>& cols, const std::string& name_to_find) {
+                    return std::find_if(cols.begin(), cols.end(), [&](const std::string& col_name) {
+                        std::string lower_name = col_name;
+                        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+                        std::string target_name = name_to_find;
+                        std::transform(target_name.begin(), target_name.end(), target_name.begin(), ::tolower);
+                        return lower_name == target_name;
+                    });
+                };
 
-            auto date_it = find_case_insensitive(columns, "Date");
-            auto time_it = find_case_insensitive(columns, "Time");
+                auto date_it = find_case_insensitive(columns, "Date");
+                auto time_it = find_case_insensitive(columns, "Time");
 
-            if (date_it == columns.end()) {
-                m_hasError = true;
-                m_errorMessage = "Required 'Date' column not found in file.";
-                if (wasQuestDBFetch) {
+                if (date_it == columns.end()) {
+                    m_hasError = true;
+                    m_errorMessage = "Required 'Date' column not found in file.";
+                    finishLoading();
+                    return;
+                }
+
+                df->set_tssb_metadata(*date_it, (time_it != columns.end()) ? *time_it : "");
+
+                m_detectedTimeFormat = chronosflow::TimeFormat::NONE;
+                if (time_it != columns.end()) {
+                    auto time_col = df->get_cpu_table()->GetColumnByName(*time_it);
+                    for (int64_t i = 0; i < time_col->length(); ++i) {
+                        auto scalar_res = time_col->GetScalar(i);
+                        if (scalar_res.ok() && scalar_res.ValueOrDie()->is_valid) {
+                            int64_t time_val = std::static_pointer_cast<arrow::Int64Scalar>(scalar_res.ValueOrDie())->value;
+                            if (std::to_string(time_val).length() > 4) {
+                                m_detectedTimeFormat = chronosflow::TimeFormat::HHMMSS;
+                            } else {
+                                m_detectedTimeFormat = chronosflow::TimeFormat::HHMM;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                if (df->has_tssb_metadata()) {
+                    auto ts_result = df->with_unix_timestamp("timestamp_unix", m_detectedTimeFormat);
+                    if (ts_result.ok()) {
+                        *df = std::move(ts_result).ValueOrDie();
+                    } else {
+                        m_hasError = true;
+                        m_errorMessage = "Failed to create Unix timestamps: " + ts_result.status().ToString();
+                        finishLoading();
+                        return;
+                    }
+                }
+            } else {
+                m_detectedTimeFormat = chronosflow::TimeFormat::NONE;
+                auto table = df->get_cpu_table();
+                if (!table || !table->GetColumnByName("timestamp_unix")) {
+                    m_hasError = true;
+                    m_errorMessage = "Stage1 dataset is missing the required 'timestamp_unix' column.";
                     m_lastQuestDBFetchSuccess = false;
                     m_questdbStatusMessage = m_errorMessage;
-                }
-                finishLoading();
-                return;
-            }
-
-            df->set_tssb_metadata(*date_it, (time_it != columns.end()) ? *time_it : "");
-
-            m_detectedTimeFormat = chronosflow::TimeFormat::NONE;
-            if (time_it != columns.end()) {
-                auto time_col = df->get_cpu_table()->GetColumnByName(*time_it);
-                for (int64_t i = 0; i < time_col->length(); ++i) {
-                    auto scalar_res = time_col->GetScalar(i);
-                    if (scalar_res.ok() && scalar_res.ValueOrDie()->is_valid) {
-                        int64_t time_val = std::static_pointer_cast<arrow::Int64Scalar>(scalar_res.ValueOrDie())->value;
-                        if (std::to_string(time_val).length() > 4) {
-                            m_detectedTimeFormat = chronosflow::TimeFormat::HHMMSS;
-                        } else {
-                            m_detectedTimeFormat = chronosflow::TimeFormat::HHMM;
-                        }
-                        break;
-                    }
-                }
-            }
-
-            if (df->has_tssb_metadata()) {
-                auto ts_result = df->with_unix_timestamp("timestamp_unix", m_detectedTimeFormat);
-                if (ts_result.ok()) {
-                    *df = std::move(ts_result).ValueOrDie();
-                } else {
-                    m_hasError = true;
-                    m_errorMessage = "Failed to create Unix timestamps: " + ts_result.status().ToString();
-                    if (wasQuestDBFetch) {
-                        m_lastQuestDBFetchSuccess = false;
-                        m_questdbStatusMessage = m_errorMessage;
-                    }
                     finishLoading();
                     return;
                 }
@@ -410,8 +666,6 @@ void TimeSeriesWindow::Draw() {
                 m_questdbStatusMessage = "Loaded QuestDB table '" + tableName + "'.";
             }
 
-            std::cout << "[TimeSeriesWindow] Loaded " << m_dataFrame->num_rows()
-                      << " rows with " << m_dataFrame->num_columns() << " columns" << std::endl;
         } else {
             m_hasError = true;
             m_errorMessage = result.status().ToString();
@@ -419,7 +673,6 @@ void TimeSeriesWindow::Draw() {
                 m_lastQuestDBFetchSuccess = false;
                 m_questdbStatusMessage = m_errorMessage;
             }
-            std::cout << "[TimeSeriesWindow] Failed to load: " << m_errorMessage << std::endl;
         }
         finishLoading();
     }
@@ -883,9 +1136,164 @@ void TimeSeriesWindow::LoadQuestDBTable(const std::string& tableName) {
     m_lastQuestDBFetchSuccess = false;
     m_loadedFilePath = "QuestDB:" + trimmedName;
 
-    m_loadingFuture = std::async(std::launch::async, [trimmedName]() {
+    m_loadingFuture = std::async(std::launch::async, [trimmedName]() -> arrow::Result<chronosflow::AnalyticsDataFrame> {
         questdb::DataFrameGateway gateway;
-        return gateway.Import(trimmedName);
+        ARROW_ASSIGN_OR_RAISE(auto frame, gateway.Import(trimmedName));
+        return EnsureTimestampUnixColumn(std::move(frame));
+    });
+}
+
+void TimeSeriesWindow::LoadFromStage1(const std::string& datasetId) {
+    if (m_isLoading) {
+        return;
+    }
+
+    if (datasetId.empty()) {
+        m_lastQuestDBFetchSuccess = false;
+        m_questdbStatusMessage = "Dataset ID is required.";
+        return;
+    }
+
+    m_isLoading = true;
+    m_isQuestDBFetching = true;
+    m_hasError = false;
+    m_errorMessage.clear();
+    m_questdbStatusMessage.clear();
+    m_lastQuestDBFetchSuccess = false;
+    m_loadedFilePath = "Stage1:" + datasetId;
+
+    m_loadingFuture = std::async(std::launch::async, [datasetId]() -> arrow::Result<chronosflow::AnalyticsDataFrame> {
+        // Fetch data from Stage1 API
+        Json::Value rows;
+        std::string error;
+        if (!stage1::RestClient::Instance().FetchDatasetIndicators(datasetId, &rows, &error)) {
+            return arrow::Status::IOError("Failed to fetch indicators: " + error);
+        }
+
+        if (!rows.isArray() || rows.empty()) {
+            return arrow::Status::IOError("No indicator data returned from Stage1.");
+        }
+
+        // Build Arrow table directly from JSON
+        std::vector<std::string> columnNames;
+        std::map<std::string, std::vector<double>> doubleColumns;
+        std::vector<int64_t> timestamps;
+
+        // Extract column names from first row (skip timestamp and string columns)
+        if (rows[0].isObject()) {
+            for (auto it = rows[0].begin(); it != rows[0].end(); ++it) {
+                std::string colName = it.name();
+                // Skip timestamp columns and string columns (Date, Time, etc.)
+                if (colName == "timestamp_ms" || colName == "timestamp" ||
+                    colName == "Date" || colName == "Time" ||
+                    !it->isNumeric()) {
+                    continue;
+                }
+                columnNames.push_back(colName);
+                doubleColumns[colName].reserve(rows.size());
+            }
+        }
+
+        timestamps.reserve(rows.size());
+
+        // Helper to parse ISO8601 timestamp to milliseconds
+        auto parseTimestampMs = [](const Json::Value& val) -> int64_t {
+            if (val.isInt64()) {
+                return val.asInt64();
+            } else if (val.isString()) {
+                std::string str = val.asString();
+                // Parse ISO8601: "2024-11-28T22:00:00.000000Z"
+                if (str.size() >= 19) {
+                    std::tm tm = {};
+                    int year, month, day, hour, minute, second;
+                    if (sscanf(str.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) == 6) {
+                        tm.tm_year = year - 1900;
+                        tm.tm_mon = month - 1;
+                        tm.tm_mday = day;
+                        tm.tm_hour = hour;
+                        tm.tm_min = minute;
+                        tm.tm_sec = second;
+                        #ifdef _WIN32
+                        time_t t = _mkgmtime(&tm);
+                        #else
+                        time_t t = timegm(&tm);
+                        #endif
+                        int64_t millis = static_cast<int64_t>(t) * 1000LL;
+                        auto dot = str.find('.');
+                        if (dot != std::string::npos) {
+                            std::string frac = str.substr(dot + 1);
+                            while (!frac.empty() && !std::isdigit(static_cast<unsigned char>(frac.back()))) {
+                                frac.pop_back();
+                            }
+                            if (!frac.empty()) {
+                                while (frac.size() < 3) frac.push_back('0');
+                                if (frac.size() > 3) frac.resize(3);
+                                try {
+                                    millis += std::stoll(frac);
+                                } catch (...) {
+                                }
+                            }
+                        }
+                        return millis;
+                    }
+                }
+            }
+            return 0;
+        };
+
+        // Extract data
+        for (const auto& row : rows) {
+            if (!row.isObject()) continue;
+
+            // Extract timestamp (milliseconds)
+            int64_t ts_millis = 0;
+            if (row.isMember("timestamp_ms")) {
+                ts_millis = parseTimestampMs(row["timestamp_ms"]);
+            } else if (row.isMember("timestamp")) {
+                ts_millis = parseTimestampMs(row["timestamp"]);
+            }
+            timestamps.push_back(ts_millis);
+
+            // Extract indicator values
+            for (const auto& colName : columnNames) {
+                double value = 0.0;
+                if (row.isMember(colName)) {
+                    const auto& val = row[colName];
+                    if (val.isDouble()) {
+                        value = val.asDouble();
+                    } else if (val.isInt()) {
+                        value = static_cast<double>(val.asInt64());
+                    }
+                }
+                doubleColumns[colName].push_back(value);
+            }
+        }
+
+        // Build Arrow schema and arrays
+        std::vector<std::shared_ptr<arrow::Field>> fields;
+        std::vector<std::shared_ptr<arrow::Array>> arrays;
+
+        // Add timestamp column (seconds, same as QuestDB export)
+        fields.push_back(arrow::field("timestamp_unix", arrow::int64()));
+        arrow::Int64Builder tsBuilder;
+        ARROW_RETURN_NOT_OK(tsBuilder.AppendValues(timestamps));
+        std::shared_ptr<arrow::Array> tsArray;
+        ARROW_RETURN_NOT_OK(tsBuilder.Finish(&tsArray));
+        arrays.push_back(tsArray);
+
+        // Add indicator columns
+        for (const auto& colName : columnNames) {
+            fields.push_back(arrow::field(colName, arrow::float64()));
+            arrow::DoubleBuilder builder;
+            ARROW_RETURN_NOT_OK(builder.AppendValues(doubleColumns[colName]));
+            std::shared_ptr<arrow::Array> array;
+            ARROW_RETURN_NOT_OK(builder.Finish(&array));
+            arrays.push_back(array);
+        }
+
+        auto schema = arrow::schema(fields);
+        auto table = arrow::Table::Make(schema, arrays);
+        return chronosflow::AnalyticsDataFrame(table);
     });
 }
 
@@ -995,7 +1403,6 @@ void TimeSeriesWindow::ClearData() {
     }
     
     ResetUIState();
-    std::cout << "[TimeSeriesWindow] Data cleared" << std::endl;
 }
 
 void TimeSeriesWindow::ResetUIState() {
@@ -1051,15 +1458,20 @@ void TimeSeriesWindow::UpdatePlotData() {
     m_cachedPlotTimes.reserve(num_rows);
 
     for (size_t i = 0; i < num_rows; ++i) {
-        // Here we assume ColumnView gives valid data. You might add isnan checks.
         m_cachedPlotValues.push_back(values_data[i]);
-        m_cachedPlotTimes.push_back(static_cast<double>(times_data[i]));
+        int64_t timestamp = times_data[i];
+
+        double timestamp_seconds;
+        if (timestamp != 0 && std::llabs(timestamp) < 4'000'000'000LL) {
+            timestamp_seconds = static_cast<double>(timestamp);
+        } else {
+            timestamp_seconds = static_cast<double>(timestamp) / 1000.0;
+        }
+        m_cachedPlotTimes.push_back(timestamp_seconds);
     }
-    
+
     m_cachedIndicatorName = m_selectedIndicator;
     m_plotDataDirty = false;
-    
-    std::cout << "[TimeSeriesWindow] Updated plot cache for " << m_selectedIndicator << std::endl;
 }
 
 
@@ -1079,17 +1491,7 @@ void TimeSeriesWindow::UpdateDisplayCache() {
         m_displayCache[row].resize(numColumns);
         for (int col = 0; col < numColumns; ++col) {
             auto column_data = table->column(col);
-            auto scalar_result = column_data->GetScalar(row);
-            if (scalar_result.ok()) {
-                auto scalar = scalar_result.ValueOrDie();
-                if (scalar->is_valid) {
-                    m_displayCache[row][col] = scalar->ToString();
-                } else {
-                    m_displayCache[row][col] = "N/A";
-                }
-            } else {
-                m_displayCache[row][col] = "[Error]";
-            }
+            m_displayCache[row][col] = ChunkedValueToString(column_data, static_cast<int64_t>(row));
         }
     }
 }
@@ -1105,9 +1507,6 @@ void TimeSeriesWindow::NotifyColumnSelection(const std::string& indicatorName, s
         
         // Make the histogram window visible
         m_histogramWindow->SetVisible(true);
-        
-        std::cout << "[TimeSeriesWindow] Notified histogram window of column selection: "
-                  << indicatorName << " (index: " << columnIndex << ")" << std::endl;
     }
 }
 
@@ -1141,9 +1540,6 @@ void TimeSeriesWindow::SelectIndicator(const std::string& indicatorName, size_t 
     
     // Make this window visible if it's hidden
     SetVisible(true);
-    
-    std::cout << "[TimeSeriesWindow] Selected indicator: " << indicatorName 
-              << " (index: " << columnIndex << ")" << std::endl;
 }
 
 void TimeSeriesWindow::SelectIndicatorByIndex(size_t columnIndex) {

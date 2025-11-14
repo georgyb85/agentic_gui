@@ -8,6 +8,7 @@
 #include "TradeSimulator.h"
 #include "simulation/SimulationTypes.h"
 #include "simulation/XGBoostConfig.h"
+#include "simulation/PerformanceStressTests.h"
 
 class RunConfigSerializer {
 public:
@@ -31,6 +32,9 @@ public:
 
         bool hasTradeConfig = false;
         TradeSimulator::Config trade;
+
+        bool hasStressConfig = false;
+        simulation::StressTestConfig stress;
     };
 
     enum Section : uint32_t {
